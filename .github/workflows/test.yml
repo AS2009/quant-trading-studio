@@ -60,6 +60,11 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq xvfb python3-tk
 
+      # 121 项桌面测试（含真实 Tk 控件与页面测试），在虚拟显示器下跑。
+      # 这一步仍属“可失败”任务；权威验收在 build-desktop.yml 的 Windows 作业里（那一步是硬门禁）。
+      - name: 桌面版测试（xvfb 虚拟显示器）
+        run: xvfb-run -a /usr/bin/python3 -m unittest discover -s desktop/tests -v
+
       - name: 桌面自检 --selftest（源码，系统 Python）
         working-directory: desktop
         run: |

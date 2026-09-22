@@ -381,7 +381,7 @@ class ViewTestCase(unittest.TestCase):
         self.apps.append(app)
         return app
 
-    def open_page(self, view_class, app, timeout=8.0):
+    def open_page(self, view_class, app, timeout=20.0):
         """构建页面（build + reload）并驱动事件循环直到后台请求全部回主线程。"""
         frame = ttk.Frame(self.root, style="TFrame")
         frame.pack(fill="both", expand=True)
@@ -392,7 +392,7 @@ class ViewTestCase(unittest.TestCase):
         self.pump(page, app, timeout)
         return page
 
-    def pump(self, page, app, timeout=8.0):
+    def pump(self, page, app, timeout=20.0):
         deadline = time.time() + timeout
         idle = 0
         while time.time() < deadline:

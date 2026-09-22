@@ -79,6 +79,13 @@ jobs:
         shell: pwsh
         run: python -m unittest discover -s backend/tests -v
 
+      # 桌面版测试（121 项）：纯函数几何 + 真实 Tk 控件烟雾 + 页面级替身服务。
+      # Windows 上 tkinter 随官方 Python 提供，不再需要额外依赖；这一步能在打包前
+      # 抓出界面/控件/页面的回归（打包只验证“能不能起来”，测试验证“行为对不对”）。
+      - name: 桌面版测试（含真实 Tk 页面测试）
+        shell: pwsh
+        run: python -m unittest discover -s desktop/tests -v
+
       - name: 策略规范校验
         shell: pwsh
         run: python scripts/check_strategies.py
