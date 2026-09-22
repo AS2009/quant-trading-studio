@@ -1,0 +1,175 @@
+name: build-desktop
+
+# 触发：
+#  - push 到 main/master：回归
+#  - pull_request：PR 检查
+#  - 手动 workflow_dispatch
+#  - push tag `v*`：打包 + 发布 Release（附 zip 与单文件 exe）
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write          # tag 构建需要创建 Release
+
+concurrency:
+  group: build-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------- 快速测试（ubuntu，先拦住明显的回归）
+  test:
+    name: 核心测试 py${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 安装测试依赖（Web 版测试需要 Flask；桌面版运行时不需要）
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install flask
+
+      - name: 核心测试（backend/tests 全量）
+        run: python -m unittest discover -s backend/tests -v
+
+      - name: 策略规范校验
+        run: python scripts/check_strategies.py
+
+  # ---------------------------------------------------------------- Windows 打包 + 产物自检 + 上传/发布
+  build-windows:
+    name: Windows 打包与产物自检
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 必须用 setup-python 的 python.org 构建：自带 tkinter/ttk（Windows 桌面版 GUI 依赖它）
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 校验 Python 与 tkinter
+        shell: pwsh
+        run: |
+          python -c "import sys; print('Python', sys.version)"
+          python -c "import tkinter; print('tkinter OK, Tk', tkinter.TkVersion)"
+
+      - name: 安装打包依赖（pyinstaller）
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-desktop.txt
+
+      - name: 安装测试依赖（Web 版测试需要 Flask；桌面版运行时不需要）
+        shell: pwsh
+        run: python -m pip install flask
+
+      - name: 核心测试（Windows 上再跑一遍，证明 Windows 环境可用）
+        shell: pwsh
+        run: python -m unittest discover -s backend/tests -v
+
+      - name: 策略规范校验
+        shell: pwsh
+        run: python scripts/check_strategies.py
+
+      - name: 桌面自检（源码）
+        shell: pwsh
+        working-directory: desktop
+        run: python -m quantstudio_desktop --selftest
+
+      - name: PyInstaller 打包（onedir，推荐）
+        shell: pwsh
+        run: >
+          python -m PyInstaller desktop/build/quantstudio.spec --noconfirm
+          --distpath desktop/build/output/dist --workpath desktop/build/output/work
+
+      - name: PyInstaller 打包（onefile，单文件版）
+        shell: pwsh
+        run: >
+          python -m PyInstaller desktop/build/quantstudio-onefile.spec --noconfirm
+          --distpath desktop/build/output/dist-onefile --workpath desktop/build/output/work-onefile
+
+      # 关键一步：无控制台的 GUI 产物也必须能跑通自检，退出码必须是 0
+      # （--selftest 的 stdout 可能为空，所以同时读 %TEMP%\quantstudio_selftest.txt）
+      - name: 产物自检（--selftest / --selftest-gui / onefile）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $report = Join-Path $env:TEMP "quantstudio_selftest.txt"
+          $outDir = "desktop/build/output/selftest"
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+          function Invoke-Selftest {
+            param([string]$Exe, [string]$Argument, [string]$ReportName)
+            if (-not (Test-Path $Exe)) { throw "找不到打包产物：$Exe" }
+            Remove-Item $report -ErrorAction SilentlyContinue
+            Write-Host ""
+            Write-Host "==== 执行 $Exe $Argument" -ForegroundColor Cyan
+            # console=False 的 GUI 程序用 `&` 调用时 PowerShell 不会等待，必须 Start-Process -Wait
+            $proc = Start-Process -FilePath $Exe -ArgumentList $Argument -Wait -PassThru
+            Write-Host "==== 退出码：$($proc.ExitCode)" -ForegroundColor Cyan
+            if (Test-Path $report) {
+              Copy-Item $report (Join-Path $outDir $ReportName) -Force
+              Get-Content $report -Encoding UTF8 | Write-Host
+            }
+            else {
+              Write-Warning "自检报告文件不存在：$report"
+            }
+            if ($proc.ExitCode -ne 0) {
+              throw "$Argument 自检失败（exit=$($proc.ExitCode)）"
+            }
+          }
+
+          Invoke-Selftest -Exe "desktop/build/output/dist/QuantTradingStudio/QuantTradingStudio.exe" `
+                          -Argument "--selftest" -ReportName "selftest-onedir.txt"
+          Invoke-Selftest -Exe "desktop/build/output/dist/QuantTradingStudio/QuantTradingStudio.exe" `
+                          -Argument "--selftest-gui" -ReportName "selftest-gui-onedir.txt"
+          Invoke-Selftest -Exe "desktop/build/output/dist-onefile/QuantTradingStudio.exe" `
+                          -Argument "--selftest" -ReportName "selftest-onefile.txt"
+
+      - name: 整理上传产物（zip / exe / 自检报告）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $artifacts = "desktop/build/output/artifacts"
+          New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
+          Compress-Archive -Path "desktop/build/output/dist/QuantTradingStudio" `
+                           -DestinationPath "$artifacts/QuantTradingStudio-windows-x64.zip" -Force
+          Copy-Item "desktop/build/output/dist-onefile/QuantTradingStudio.exe" `
+                    "$artifacts/QuantTradingStudio-onefile-windows-x64.exe" -Force
+          Copy-Item "desktop/build/output/selftest/*.txt" "$artifacts/" -Force
+          Get-ChildItem $artifacts | Select-Object Name, Length | Format-Table
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QuantTradingStudio-windows-x64
+          if-no-files-found: error
+          path: |
+            desktop/build/output/artifacts/QuantTradingStudio-windows-x64.zip
+            desktop/build/output/artifacts/QuantTradingStudio-onefile-windows-x64.exe
+            desktop/build/output/artifacts/*.txt
+
+      # tag v* → 发布 Release（zip + 单文件 exe）
+      - name: 发布 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: QuantTrading Studio ${{ github.ref_name }} (Windows 桌面版)
+          generate_release_notes: true
+          draft: false
+          files: |
+            desktop/build/output/artifacts/QuantTradingStudio-windows-x64.zip
+            desktop/build/output/artifacts/QuantTradingStudio-onefile-windows-x64.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

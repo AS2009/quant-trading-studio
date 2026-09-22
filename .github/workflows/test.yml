@@ -1,0 +1,73 @@
+name: test
+
+# 快速测试流水线：不需要 Windows、不需要 PyInstaller，几分钟内给核心代码兜底。
+# 触发：push 到 main/master、PR、手动触发。
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: 核心测试 py${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 安装测试依赖（backend/tests/test_api.py 需要 Flask；桌面版运行时不需要）
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install flask
+
+      - name: 核心测试（backend/tests 全量）
+        run: python -m unittest discover -s backend/tests -v
+
+      - name: 策略规范校验（内置 + local/ 策略）
+        run: python scripts/check_strategies.py
+
+      - name: 语法编译检查（backend / desktop / scripts）
+        run: python -m compileall -q backend desktop scripts
+
+  # 桌面 GUI 的可选冒烟测试：Linux runner 没有显示器（xvfb 可造一个），
+  # 且 setup-python 的 Linux 构建通常不带 tkinter（系统 python3 + python3-tk 才有），
+  # 所以这一步**允许失败**，只是尽早发现明显问题；正式验收在 build-desktop.yml 的 Windows 产物自检。
+  gui-smoke:
+    name: 桌面 GUI 冒烟（xvfb，可失败）
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装 xvfb 与系统 Tk（系统 python3 才带 tkinter）
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb python3-tk
+
+      - name: 桌面自检 --selftest（源码，系统 Python）
+        working-directory: desktop
+        run: |
+          /usr/bin/python3 -c "import tkinter; print('tkinter OK, Tk', tkinter.TkVersion)"
+          /usr/bin/python3 -m quantstudio_desktop --selftest
+
+      - name: 桌面自检 --selftest-gui（xvfb 虚拟显示器）
+        working-directory: desktop
+        run: |
+          xvfb-run -a /usr/bin/python3 -m quantstudio_desktop --selftest-gui
+          cat "${TMPDIR:-/tmp}/quantstudio_selftest.txt" || true

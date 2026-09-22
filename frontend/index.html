@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QuantTrading Studio - 量化交易工作台</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" href="data:,">
+</head>
+<body>
+  <!-- 数据源状态条：由 js/ui.js 的 SourceBar 渲染（真实 / 缓存 / 离线三态 + 可展开详情） -->
+  <div id="source-bar" class="source-bar" data-level="unknown" role="region" aria-label="数据源状态"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark"></span>
+      <span class="brand-name">QuantTrading Studio</span>
+      <span class="brand-sub">量化交易工作台</span>
+    </div>
+    <nav class="tabs" role="tablist" aria-label="主功能切换">
+      <button class="tab active" data-view="market" role="tab" aria-selected="true">行情看板</button>
+      <button class="tab" data-view="strategy" role="tab" aria-selected="false">策略管理</button>
+      <button class="tab" data-view="backtest" role="tab" aria-selected="false">回测分析</button>
+      <button class="tab" data-view="portfolio" role="tab" aria-selected="false">持仓管理</button>
+      <button class="tab" data-view="trade" role="tab" aria-selected="false">交易</button>
+    </nav>
+    <div class="clock" id="clock" aria-label="当前时间"></div>
+  </header>
+
+  <!-- 视图容器：各视图由 js/views/*.js 自行渲染内部结构，index.html 只保留骨架 -->
+  <main class="content" id="app-main">
+    <div id="views"></div>
+  </main>
+
+  <div id="modal-root"></div>
+  <div class="toast-wrap" id="toast-wrap" aria-live="polite"></div>
+
+  <!-- 无构建步骤：按依赖顺序直接引入（不得使用 ESM import） -->
+  <script src="vendor/echarts.min.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/charts.js"></script>
+  <script src="js/views/market.js"></script>
+  <script src="js/views/strategies.js"></script>
+  <script src="js/views/backtest.js"></script>
+  <script src="js/views/portfolio.js"></script>
+  <script src="js/views/trade.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>

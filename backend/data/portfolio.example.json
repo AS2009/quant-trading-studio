@@ -1,0 +1,10 @@
+{
+  "mode": "manual",
+  "cash": 128456.00,
+  "note": "手工录入的真实持仓示例；可直接编辑本文件，或通过界面的『持仓管理』增删改。",
+  "holdings": [
+    {"code": "600519.SH", "name": "贵州茅台", "qty": 100, "cost": 1680.50, "available_qty": 100},
+    {"code": "300750.SZ", "name": "宁德时代", "qty": 200, "cost": 242.30, "available_qty": 200},
+    {"code": "600036.SH", "name": "招商银行", "qty": 1000, "cost": 36.80, "available_qty": 1000}
+  ]
+}

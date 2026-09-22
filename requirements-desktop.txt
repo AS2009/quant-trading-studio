@@ -1,0 +1,22 @@
+# QuantTrading Studio 桌面版 —— 打包依赖
+#
+# 重要：桌面版运行时 **零第三方依赖**。
+#   - 核心（backend/quantstudio）与桌面界面（desktop/quantstudio_desktop）全部使用标准库；
+#   - GUI 用 tkinter/ttk，随 CPython 官方安装包提供（python.org 的 Windows 构建自带 Tk；
+#     Linux 需自行 apt install python3-tk）；
+#   - 因此发布给用户的 exe/目录里**不含** flask / pandas / numpy / matplotlib，
+#     spec 里也通过 excludes 明确排除了它们。
+#
+# 本文件只列出「打包阶段」需要的工具（PyInstaller），所以：
+#   生产环境 pip install -r requirements-desktop.txt
+#   运行环境什么都不用装
+#
+# 用法：
+#   python -m pip install -r requirements-desktop.txt      # 打包机 / CI
+#   python -m PyInstaller desktop/build/quantstudio.spec --noconfirm \
+#       --distpath desktop/build/output/dist --workpath desktop/build/output/work
+#
+# 注：Windows 上必须使用 python.org 官方安装包（自带 tkinter）；
+#     Microsoft Store 版 Python 与部分精简发行版缺少 Tk，会导致打包产物自检失败。
+
+pyinstaller>=6.6
