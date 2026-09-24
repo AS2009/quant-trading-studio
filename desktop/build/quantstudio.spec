@@ -162,6 +162,19 @@ if os.path.isdir(_LOCAL_STRATEGY_DIR):
             DATAS.append((os.path.join(_LOCAL_STRATEGY_DIR, filename),
                           os.path.join("quantstudio", "strategies", "local")))
 
+# MCP 的文档资源（resources）与提示词模板要能读到项目文档：
+# 打包后 ``ctx.repo_root`` 指向包根（onedir 是 ``_internal``），所以按同样的相对层级铺开放。
+# 缺了它们，``--mcp --selftest`` 会因为「资源数 0」失败（CI 就是这么发现的）。
+for _rel_dir in ("docs",):
+    _src_dir = os.path.join(_REPO_ROOT, _rel_dir)
+    if os.path.isdir(_src_dir):
+        DATAS.append((_src_dir, _rel_dir))
+if os.path.isfile(os.path.join(_REPO_ROOT, "README.md")):
+    DATAS.append((os.path.join(_REPO_ROOT, "README.md"), "."))
+if os.path.isfile(os.path.join(_BACKEND_DIR, "data", "README.md")):
+    DATAS.append((os.path.join(_BACKEND_DIR, "data", "README.md"),
+                  os.path.join("backend", "data")))
+
 # --------------------------------------------------------------------------- 可选资源
 _EXE_KWARGS = {}
 if os.path.exists(_ICON_FILE):

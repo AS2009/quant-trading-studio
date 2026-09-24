@@ -133,6 +133,17 @@ if os.path.isdir(_LOCAL_STRATEGY_DIR):
             DATAS.append((os.path.join(_LOCAL_STRATEGY_DIR, _filename),
                           os.path.join("quantstudio", "strategies", "local")))
 
+# MCP 文档资源：打包后 ``ctx.repo_root`` 指向包根，按同样相对层级铺开 docs/ 与 README
+for _rel_dir in ("docs",):
+    _src_dir = os.path.join(_REPO_ROOT, _rel_dir)
+    if os.path.isdir(_src_dir):
+        DATAS.append((_src_dir, _rel_dir))
+if os.path.isfile(os.path.join(_REPO_ROOT, "README.md")):
+    DATAS.append((os.path.join(_REPO_ROOT, "README.md"), "."))
+if os.path.isfile(os.path.join(_BACKEND_DIR, "data", "README.md")):
+    DATAS.append((os.path.join(_BACKEND_DIR, "data", "README.md"),
+                  os.path.join("backend", "data")))
+
 # --------------------------------------------------------------------------- 可选资源（缺失即降级，不让 CI 失败）
 _EXE_KWARGS = {}
 if os.path.exists(_ICON_FILE):
