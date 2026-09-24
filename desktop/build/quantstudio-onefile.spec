@@ -88,6 +88,24 @@ quantstudio_desktop.services
 quantstudio_desktop.selftest
 """.split()
 
+# MCP 服务器（桌面版 --mcp）：tools_*.py 由 importlib 动态导入、resources/prompts 惰性导入
+HIDDEN_IMPORTS += """
+quantstudio.mcp
+quantstudio.mcp.cli
+quantstudio.mcp.protocol
+quantstudio.mcp.registry
+quantstudio.mcp.context
+quantstudio.mcp.safety
+quantstudio.mcp.server
+quantstudio.mcp.tools
+quantstudio.mcp.tools_market
+quantstudio.mcp.tools_strategy
+quantstudio.mcp.tools_backtest
+quantstudio.mcp.tools_portfolio
+quantstudio.mcp.resources
+quantstudio.mcp.prompts
+""".split()
+
 # 本地策略 drop-in 目录：模块名运行期才拼出来，按目录扫描补齐
 if os.path.isdir(_LOCAL_STRATEGY_DIR):
     for _filename in sorted(os.listdir(_LOCAL_STRATEGY_DIR)):

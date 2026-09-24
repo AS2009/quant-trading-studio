@@ -41,6 +41,13 @@ jobs:
       - name: 语法编译检查（backend / desktop / scripts）
         run: python -m compileall -q backend desktop scripts
 
+      # MCP 服务器（stdio，给大模型用）：自检 = 握手 → tools/list → 调一个只读工具
+      - name: MCP 服务器自检
+        run: |
+          python scripts/mcp_server.py --selftest
+          python scripts/mcp_server.py --read-only --selftest
+          python scripts/mcp_server.py --version
+
   # 桌面 GUI 的可选冒烟测试：Linux runner 没有显示器（xvfb 可造一个），
   # 且 setup-python 的 Linux 构建通常不带 tkinter（系统 python3 + python3-tk 才有），
   # 所以这一步**允许失败**，只是尽早发现明显问题；正式验收在 build-desktop.yml 的 Windows 产物自检。

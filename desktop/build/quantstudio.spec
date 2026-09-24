@@ -87,6 +87,22 @@ _DESKTOP_HIDDEN = [
     "quantstudio_desktop.views.backtest",
     "quantstudio_desktop.views.portfolio",
     "quantstudio_desktop.views.trade",
+    # MCP 服务器（桌面版 `--mcp`）：tools_*.py 由 tools.py 的 importlib 动态导入，
+    # resources/prompts 在 cli.build_server 里惰性导入 —— 静态分析都看不到，必须显式列。
+    "quantstudio.mcp",
+    "quantstudio.mcp.cli",
+    "quantstudio.mcp.protocol",
+    "quantstudio.mcp.registry",
+    "quantstudio.mcp.context",
+    "quantstudio.mcp.safety",
+    "quantstudio.mcp.server",
+    "quantstudio.mcp.tools",
+    "quantstudio.mcp.tools_market",
+    "quantstudio.mcp.tools_strategy",
+    "quantstudio.mcp.tools_backtest",
+    "quantstudio.mcp.tools_portfolio",
+    "quantstudio.mcp.resources",
+    "quantstudio.mcp.prompts",
 ]
 
 # GUI 用到的标准库模块（PyInstaller 钩子通常能覆盖，显式列出以保证跨版本稳定）

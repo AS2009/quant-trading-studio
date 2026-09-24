@@ -102,6 +102,13 @@ jobs:
         working-directory: desktop
         run: python -m quantstudio_desktop --selftest
 
+      - name: MCP 服务器自检（源码）
+        shell: pwsh
+        run: |
+          # 可读写模式 + 只读模式各跑一次（两者都必须 exit 0）
+          python scripts/mcp_server.py --selftest
+          python scripts/mcp_server.py --read-only --selftest
+
       - name: PyInstaller 打包（onedir，推荐）
         shell: pwsh
         run: >
@@ -121,24 +128,25 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $report = Join-Path $env:TEMP "quantstudio_selftest.txt"
+          $mcpReport = Join-Path $env:TEMP "quantstudio_mcp_selftest.txt"
           $outDir = "desktop/build/output/selftest"
           New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
           function Invoke-Selftest {
-            param([string]$Exe, [string]$Argument, [string]$ReportName)
+            param([string]$Exe, [string]$Argument, [string]$ReportName, [string]$ReportFile)
             if (-not (Test-Path $Exe)) { throw "找不到打包产物：$Exe" }
-            Remove-Item $report -ErrorAction SilentlyContinue
+            Remove-Item $ReportFile -ErrorAction SilentlyContinue
             Write-Host ""
             Write-Host "==== 执行 $Exe $Argument" -ForegroundColor Cyan
             # console=False 的 GUI 程序用 `&` 调用时 PowerShell 不会等待，必须 Start-Process -Wait
             $proc = Start-Process -FilePath $Exe -ArgumentList $Argument -Wait -PassThru
             Write-Host "==== 退出码：$($proc.ExitCode)" -ForegroundColor Cyan
-            if (Test-Path $report) {
-              Copy-Item $report (Join-Path $outDir $ReportName) -Force
-              Get-Content $report -Encoding UTF8 | Write-Host
+            if (Test-Path $ReportFile) {
+              Copy-Item $ReportFile (Join-Path $outDir $ReportName) -Force
+              Get-Content $ReportFile -Encoding UTF8 | Write-Host
             }
             else {
-              Write-Warning "自检报告文件不存在：$report"
+              Write-Warning "自检报告文件不存在：$ReportFile"
             }
             if ($proc.ExitCode -ne 0) {
               throw "$Argument 自检失败（exit=$($proc.ExitCode)）"
@@ -146,11 +154,14 @@ jobs:
           }
 
           Invoke-Selftest -Exe "desktop/build/output/dist/QuantTradingStudio/QuantTradingStudio.exe" `
-                          -Argument "--selftest" -ReportName "selftest-onedir.txt"
+                          -Argument "--selftest" -ReportName "selftest-onedir.txt" -ReportFile $report
           Invoke-Selftest -Exe "desktop/build/output/dist/QuantTradingStudio/QuantTradingStudio.exe" `
-                          -Argument "--selftest-gui" -ReportName "selftest-gui-onedir.txt"
+                          -Argument "--selftest-gui" -ReportName "selftest-gui-onedir.txt" -ReportFile $report
+          # 桌面版 exe 也内置 MCP 服务器（stdio）：没装 Python 的机器也能给大模型用
+          Invoke-Selftest -Exe "desktop/build/output/dist/QuantTradingStudio/QuantTradingStudio.exe" `
+                          -Argument "--mcp --selftest" -ReportName "selftest-mcp-onedir.txt" -ReportFile $mcpReport
           Invoke-Selftest -Exe "desktop/build/output/dist-onefile/QuantTradingStudio.exe" `
-                          -Argument "--selftest" -ReportName "selftest-onefile.txt"
+                          -Argument "--selftest" -ReportName "selftest-onefile.txt" -ReportFile $report
 
       - name: 整理上传产物（zip / exe / 自检报告）
         shell: pwsh

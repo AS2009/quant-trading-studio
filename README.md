@@ -57,6 +57,18 @@ PyInstaller 自动编译 onedir + onefile 两种产物，并**对产物跑真实
 必须 exit 0）后才上传制品；打 `v*` 标签会自动发布 Release 附件。
 完整说明见 **[docs/desktop-gui.md](docs/desktop-gui.md)**。
 
+## MCP（给大模型调用）
+
+同一套能力也能通过 **MCP（Model Context Protocol）** 暴露给 Claude Desktop / Claude Code / Cursor 等客户端，
+让模型直接查行情、写策略、跑回测、看持仓与模拟盘（纯标准库，克隆即可用，**永不触达真实券商**）。
+
+```bash
+python scripts/mcp_server.py              # stdio 服务器（默认可读写）
+python scripts/mcp_server.py --read-only  # 一键只读；--selftest 自检，退出码 0/1
+```
+
+仓库根的 `.mcp.json` 已配好 Claude Code；客户端接入、33 个工具清单、安全护栏与排障见 **[docs/mcp.md](docs/mcp.md)**。
+
 ---
 
 ## 架构（分层、可插拔）

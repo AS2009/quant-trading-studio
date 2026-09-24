@@ -408,13 +408,27 @@ def main(argv: Optional[list] = None) -> int:
     """命令行入口：GUI / 自检。"""
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--help" in argv or "-h" in argv:
-        print("用法: python -m quantstudio_desktop [--selftest] [--selftest-gui] [--version] [--view <key>]")
+        print("用法: python -m quantstudio_desktop [--selftest] [--selftest-gui] [--version]"
+              " [--view <key>] [--mcp [--read-only]]")
         print("  --selftest       无界面自检（数据源 + 回测 + 报告），退出码 0/1")
         print("  --selftest-gui   构建整个窗口与所有页面后立即销毁（CI 用）")
+        print("  --mcp            以 MCP 服务器（stdio）运行，供大模型调用；--read-only 只读模式")
         return 0
     if "--version" in argv:
         print("QuantTrading Studio 桌面版 %s" % __version__)
         return 0
+    if "--mcp" in argv:
+        # MCP 服务器模式（stdio，供大模型调用）：不建窗口，只转发 MCP 自己的参数
+        from quantstudio.mcp.cli import main as mcp_main
+
+        passthrough = [item for item in argv if item in ("--read-only", "--selftest",
+                                                        "--no-resources", "--no-prompts")]
+        if "--actor" in argv:
+            try:
+                passthrough += ["--actor", argv[argv.index("--actor") + 1]]
+            except IndexError:
+                pass
+        return mcp_main(passthrough)
     if "--selftest" in argv:
         from .selftest import run_selftest
 

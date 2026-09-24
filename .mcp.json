@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "quantstudio": {
+      "command": "python",
+      "args": ["scripts/mcp_server.py"],
+      "env": { "PYTHONIOENCODING": "utf-8" }
+    }
+  }
+}
