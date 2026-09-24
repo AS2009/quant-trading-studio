@@ -75,6 +75,10 @@ class TestBigOrders(unittest.TestCase):
         self.assertEqual(LT.filter_big_orders([], 1_000_000.0), [])
         # 非法阈值退回默认（100 万）
         self.assertEqual(len(LT.filter_big_orders(TICKS, "abc")), 2)
+        # 裸字符串必须等同单元素元组（否则会被拆成 {"b","u","y"} → 静默 0 行）
+        self.assertEqual(len(LT.filter_big_orders(TICKS, 200_000.0, sides="buy")), 2)
+        self.assertEqual(len(LT.filter_big_orders(TICKS, 200_000.0, sides=" BUY ")), 2)
+        self.assertEqual(len(LT.filter_big_orders(TICKS, 200_000.0, sides=["sell"])), 1)
 
     def test_summary_hand_checked(self):
         summary = LT.big_orders_summary(TICKS, 1_000_000.0)
@@ -157,6 +161,24 @@ class TestSealStatus(unittest.TestCase):
         self.assertEqual(seal["state"], "limit_up")
         self.assertAlmostEqual(seal["limit_up_price"], 12.0, places=2)
         self.assertIn("20%", seal["limit_pct_text"])
+
+    def test_limit_price_rounds_half_up_not_bankers(self):
+        """涨跌停价按 A 股口径四舍五入到分：12.35 × 1.1 = 13.585 → 13.59（不是 13.58）。"""
+        self.assertAlmostEqual(LT.round_cent(13.585), 13.59, places=2)
+        self.assertAlmostEqual(LT.round_cent(12.345), 12.35, places=2)   # 内置 round() 会给 12.34
+        self.assertAlmostEqual(LT.round_cent(10.004), 10.0, places=2)
+        self.assertAlmostEqual(LT.round_cent(None), 0.0, places=2)
+        book = _book(13.59, 12.35, bids=[(13.59, 8_000)])
+        seal = LT.seal_status(book)
+        self.assertAlmostEqual(seal["limit_up_price"], 13.59, places=2)
+        self.assertAlmostEqual(seal["limit_down_price"], 11.12, places=2)   # 12.35 × 0.9 = 11.115
+        self.assertEqual(seal["state"], "limit_up")
+        self.assertEqual(seal["seal_volume"], 8_000)
+
+    def test_cdr_689_is_twenty_percent(self):
+        """689 开头（科创板 CDR）也是 20% 档。"""
+        self.assertAlmostEqual(LT.limit_pct_for("689009.SH")[0], 0.20, places=4)
+        self.assertIn("20%", LT.limit_pct_for("689009.SH")[1])
 
 
 class TestScanAndRank(unittest.TestCase):

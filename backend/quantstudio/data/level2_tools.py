@@ -11,6 +11,7 @@
 所有函数都不抛异常：数据不足返回空结构，由上层决定展示方式。
 """
 
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..core.models import OrderBook, Tick
@@ -19,7 +20,7 @@ from .level2 import (
 )
 
 __all__ = [
-    "limit_pct_for", "filter_big_orders", "big_orders_summary", "minute_flow",
+    "limit_pct_for", "round_cent", "filter_big_orders", "big_orders_summary", "minute_flow",
     "seal_status", "scan_book", "rank_rows", "price_distribution",
 ]
 
@@ -33,11 +34,24 @@ def limit_pct_for(code: Any) -> Tuple[float, str]:
     text = str(code or "").strip().upper()
     body = text.split(".")[0]
     market = text.split(".")[1] if "." in text else ""
-    if body.startswith(("688", "300", "301")):
+    if body.startswith(("688", "689", "300", "301")):   # 689 = 科创板 CDR
         return 0.20, "创业板/科创板 20%"
     if market == "BJ" or body.startswith(("4", "8")):
         return 0.30, "北交所 30%"
     return 0.10, "主板 10%（ST 为 5%，请自行核对）"
+
+
+def round_cent(value: Any) -> float:
+    """四舍五入到**分**（A 股涨跌停价口径）。
+
+    不能用内置 ``round()``：它是银行家舍入（半进偶），而 A 股涨跌停价是四舍五入，
+    且昨收末位为 5 时约 10% 的价格会落在半分位（如 12.35 × 1.1 = 13.585 → 应为 13.59，
+    ``round`` 会给 13.58），会让「涨停价 / 距涨停」差 1 分、边界处误判是否封板。
+    """
+    number = _f(value)
+    if not number:
+        return 0.0
+    return float(Decimal(repr(number)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
 def _order_row(tick: Tick) -> Dict[str, Any]:
@@ -64,7 +78,9 @@ def filter_big_orders(ticks: Sequence[Tick], threshold: Any = SUPER_BIG_AMOUNT,
         floor = float(threshold)
     except (TypeError, ValueError):
         floor = SUPER_BIG_AMOUNT
-    wanted = set(str(item).lower() for item in (sides or ())) or None
+    if isinstance(sides, str):      # 容错：``sides="buy"`` 不能被拆成 {"b","u","y"}
+        sides = [sides]
+    wanted = set(str(item).strip().lower() for item in (sides or ())) or None
     rows: List[Dict[str, Any]] = []
     for tick in ticks or []:
         if wanted is not None and str(tick.side).lower() not in wanted:
@@ -163,8 +179,8 @@ def seal_status(book: Optional[OrderBook], amount_total: Any = 0.0, code: str = 
     }
     if book is None or _f(book.prev_close) <= 0:
         return empty
-    up = round(_f(book.prev_close) * (1.0 + pct), 2)
-    down = round(_f(book.prev_close) * (1.0 - pct), 2)
+    up = round_cent(_f(book.prev_close) * (1.0 + pct))
+    down = round_cent(_f(book.prev_close) * (1.0 - pct))
     best_bid = book.bids[0] if book.bids else None
     best_ask = book.asks[0] if book.asks else None
     price = _f(book.price) or (best_bid.price if best_bid else 0.0) or (best_ask.price if best_ask else 0.0)
