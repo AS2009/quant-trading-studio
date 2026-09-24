@@ -6,11 +6,13 @@ docs/strategy-examples.md（示例）、docs/ai-strategy-guide.md（AI 写作指
 """
 
 import json
+import importlib
 import os
 import re
 import sys
-import unittest
 import time
+import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -321,6 +323,47 @@ class TestLintCli(LocalFixtureMixin):
             code = lint_module.main(["--path", path, "--no-smoke"])
         self.assertEqual(code, 1)
         self.assertIn("E_ID_FORMAT", buffer.getvalue())
+
+
+class TestStaleImportCache(LocalFixtureMixin):
+    """Windows 现象回归：目录列表缓存读到旧内容时，导入仍要可用。
+
+    复现方式是把 ``importlib.import_module`` 打桩成「对目标模块抛 ModuleNotFoundError」——
+    这正是 Windows CI 上「刚写入的 .py 还没进导入系统的目录列表」的表现。修复有两层：
+    导入前 ``invalidate_caches()``，仍失败时按文件路径直接加载（见 ``registry._import_local_module``）。
+    """
+
+    @staticmethod
+    def _stale(target_name):
+        real = importlib.import_module
+
+        def fake(name, package=None):
+            if name == target_name:
+                raise ModuleNotFoundError("No module named %r" % name, name=name)
+            return real(name, package)
+
+        return fake
+
+    def test_discovery_falls_back_to_path_loading(self):
+        self.write_local("stale_probe", fixture_source(slug="stale_probe"))
+        target = "quantstudio.strategies.local.stale_probe"
+        sys.modules.pop(target, None)
+        with mock.patch.object(importlib, "import_module", side_effect=self._stale(target)):
+            ids = discover_local(force=True)
+        self.assertIn("st_stale_probe", ids, "缓存失效时仍应发现本地策略")
+        self.assertEqual([item for item in registry_module.LOCAL_ERRORS
+                          if item["file"] == "stale_probe.py"], [], "不应记成导入失败")
+        self.assertIn("st_stale_probe", REGISTRY)
+        # 兜底加载后模块名仍是包内规范名（相对导入与元数据不受影响）
+        self.assertEqual(REGISTRY["st_stale_probe"].__module__, target)
+
+    def test_lint_falls_back_to_path_loading(self):
+        path = self.write_local("stale_lint", fixture_source(slug="stale_lint"))
+        target = "quantstudio.strategies.local.stale_lint"
+        sys.modules.pop(target, None)
+        with mock.patch.object(importlib, "import_module", side_effect=self._stale(target)):
+            report = lint_module.lint_path(path, origin="local", smoke=False)
+        self.assertTrue(report["ok"], TestLintRules._errors(report))
 
 
 if __name__ == "__main__":

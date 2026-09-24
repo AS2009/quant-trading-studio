@@ -21,7 +21,9 @@ result = BacktestEngine(provider).run(request, strategy)
 """
 
 import importlib
+import importlib.util
 import os
+import sys
 from typing import Any, Dict, List, Optional, Sequence, Type
 
 from ..core.errors import ValidationError
@@ -100,6 +102,34 @@ def _module_strategy_classes(module: Any) -> List[Type[BaseStrategy]]:
     return found
 
 
+def _import_local_module(slug: str, filename: str):
+    """导入 ``local/<slug>.py``：先刷新导入缓存，缓存仍视而不见时按文件路径直接加载。
+
+    背景：``FileFinder`` 会按**目录 mtime** 缓存目录列表，粒度粗或同一秒内新增文件时会读到旧列表，
+    于是刚写入的策略文件 ``import_module`` 报 ``ModuleNotFoundError``（Windows CI 上实测出现，
+    用户运行中新增策略也可能踩到）。因此这里显式 ``invalidate_caches()``，并保留按路径加载的兜底。
+    """
+    module_name = "%s.%s" % (_LOCAL_PACKAGE, slug)
+    importlib.invalidate_caches()
+    try:
+        return importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if getattr(exc, "name", "") != module_name:
+            raise                                  # 缺依赖等其它导入错误照旧上抛
+    path = os.path.join(LOCAL_DIR, filename)
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ModuleNotFoundError("无法定位模块 %s（%s）" % (module_name, path), name=module_name)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
 def discover_local(force: bool = False) -> List[str]:
     """导入并注册 ``strategies/local/*.py``（幂等）。返回成功加载的策略 id 列表。"""
     global _local_discovered
@@ -115,9 +145,8 @@ def discover_local(force: bool = False) -> List[str]:
         if not filename.endswith(".py") or filename.startswith("_") or filename == "__init__.py":
             continue          # `_template.py` 之类的下划线文件按约定不加载
         slug = filename[:-3]
-        module_name = "%s.%s" % (_LOCAL_PACKAGE, slug)
         try:
-            module = importlib.import_module(module_name)
+            module = _import_local_module(slug, filename)
         except Exception as exc:                      # noqa: BLE001 - 任何异常都只记录
             LOCAL_ERRORS.append({"file": filename, "error": "%s: %s" % (type(exc).__name__, exc)})
             continue

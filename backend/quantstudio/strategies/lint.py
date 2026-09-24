@@ -579,32 +579,53 @@ def _package_module_name(path: str) -> Optional[str]:
     return ".".join(parts)
 
 
+def _load_by_path(module_name: str, path: str):
+    """按文件路径加载模块；``module_name`` 同时决定 ``__package__``，相对导入才能生效。"""
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        existing = sys.modules.get(module_name)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:  # noqa: BLE001 - 执行失败：恢复 sys.modules 后交给调用处报告
+            if existing is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = existing
+            return None
+        return module
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _load_module(path: str, refresh: bool = False):
     """优先按包导入（支持相对导入）；包外文件退化为按路径加载。
 
     ``refresh=True`` 时会重新执行模块（本地策略改完立即校验）；内置模块保持缓存，
     避免重复注册出「同 id 不同类对象」的假冲突。
+
+    新写入的文件可能因导入系统按**目录 mtime** 缓存目录列表而 ``ModuleNotFoundError``
+    （Windows CI 上实测出现），因此先 ``invalidate_caches()``，仍失败时按路径加载——
+    但**沿用包名**，否则策略文件里的相对导入会失败（见 ``registry._import_local_module``）。
     """
     name = _package_module_name(path)
     if name:
+        importlib.invalidate_caches()          # 新写入的文件必须让导入系统重新读目录列表（Windows 上尤其明显）
         try:
             if refresh and name in sys.modules:
                 return importlib.reload(sys.modules[name])
             return importlib.import_module(name)
+        except ModuleNotFoundError as exc:
+            if getattr(exc, "name", "") != name:
+                return None                    # 缺依赖等其它导入错误：交给调用处报 E_IMPORT
+            return _load_by_path(name, path)
         except Exception:  # noqa: BLE001 - 导入失败在调用处统一报告
             return None
     fallback = "quantstudio_strategy_lint_" + re.sub(r"\W+", "_", os.path.basename(path))
-    try:
-        spec = importlib.util.spec_from_file_location(fallback, path)
-        if spec is None or spec.loader is None:
-            return None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[fallback] = module
-        spec.loader.exec_module(module)
-        return module
-    except Exception:  # noqa: BLE001
-        sys.modules.pop(fallback, None)
-        return None
+    return _load_by_path(fallback, path)
 
 
 def _report(path: str, issues: List[Issue], classes: Optional[List[str]]) -> Dict[str, Any]:
