@@ -41,6 +41,9 @@ REQUEST_KEYS = frozenset(
         "stamp_duty_rate",
         "transfer_fee_rate",
         "lot_size",
+        "flow_fee",
+        "slippage_ticks",
+        "tick_size",
         "params",
     ]
 )
@@ -229,6 +232,27 @@ class BacktestService:
                     default=float(default_fee.lot_size),
                     minimum=1.0,
                 )
+            ),
+            flow_fee=parse_float(
+                options.get("flow_fee"),
+                "flow_fee",
+                default=default_fee.flow_fee,
+                minimum=0.0,
+                maximum=1000.0,
+            ),
+            slippage_ticks=parse_float(
+                options.get("slippage_ticks"),
+                "slippage_ticks",
+                default=default_fee.slippage_ticks,
+                minimum=0.0,
+                maximum=100.0,
+            ),
+            tick_size=parse_float(
+                options.get("tick_size"),
+                "tick_size",
+                default=default_fee.tick_size,
+                minimum=0.0001,
+                maximum=1.0,
             ),
         )
 

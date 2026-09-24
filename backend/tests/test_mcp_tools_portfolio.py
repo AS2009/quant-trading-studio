@@ -522,6 +522,41 @@ class McpToolsPortfolioTestCase(unittest.TestCase):
         # 同参数（include_* 只影响展示）应命中服务层回测缓存，不再取数
         self.assertEqual(len(self.provider.calls), calls_after_first)
 
+    # ------------------------------------------------------------------ ④b 费用参数透传
+
+    def test_04b_backtest_fee_options(self):
+        """新费用参数（流量费 / 跳数滑点 / tick 价位 / 手数 / 最低佣金）能从工具 schema 透传到引擎。"""
+        spec = self.registry.get("backtest_run")
+        properties = spec.input_schema["properties"]
+        for key in ("commission_min", "flow_fee", "slippage_ticks", "tick_size", "lot_size"):
+            self.assertIn(key, properties, "工具 schema 应暴露 %s" % key)
+            self.assertIn("minimum", properties[key], "%s 应带下限" % key)
+
+        args = {
+            "strategy_id": "st_ma_cross",
+            "symbols": [STOCK_CODE],
+            "start": "2024-01-02",
+            "end": "2024-06-28",
+            "initial_cash": 1000000,
+            "params": {"short_ma": 5, "long_ma": 20},
+        }
+        base = self.call("backtest_run", args)
+        self.assertFalse(base["isError"], self.text_of(base))
+        expensive = self.call("backtest_run", dict(args, flow_fee=50.0, slippage_ticks=2.0))
+        self.assertFalse(expensive["isError"], self.text_of(expensive))
+
+        base_fee = base["structuredContent"]["metrics"]["total_fee"]
+        high_fee = expensive["structuredContent"]["metrics"]["total_fee"]
+        self.assertGreater(high_fee, base_fee, "流量费与跳数滑点应推高总费用")
+        fee = expensive["structuredContent"]["request"]["fee"]
+        self.assertAlmostEqual(fee["flow_fee"], 50.0)
+        self.assertAlmostEqual(fee["slippage_ticks"], 2.0)
+        self.assertEqual(int(fee["lot_size"]), 100)
+
+        # 缺省时不下发这些键（交给 settings / FeeConfig 默认值）
+        self.assertNotIn("flow_fee", tools_backtest._run_options(args))
+
+
     # ------------------------------------------------------------------ ⑤ 模拟盘闭环 + 审计
     def test_05_paper_order_closed_loop_and_audit(self):
         before = len(self.audit_lines())

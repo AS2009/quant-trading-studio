@@ -151,7 +151,7 @@ exe 的下载与打包见 [desktop-gui.md](desktop-gui.md)。
 
 | 工具 | 作用 | 写操作 |
 |---|---|---|
-| `backtest_run` | 用真实历史日线回测策略；默认只回摘要，`include_series=true` 带净值/回撤/月度序列，`include_trades=true` 带成交流水 | 只读但重 |
+| `backtest_run` | 用真实历史日线回测策略；默认只回摘要，`include_series=true` 带净值/回撤/月度序列，`include_trades=true` 带成交流水。费用可传 `commission_rate` / `commission_min` / `flow_fee`（每笔固定费）/ `slippage_bps` / `slippage_ticks` + `tick_size`（跳数滑点）/ `lot_size` | 只读但重 |
 | `backtest_cache_info` | 查看进程内回测缓存 | 只读 |
 | `backtest_cache_clear` | 清空进程内回测缓存 | **写**（仅缓存） |
 

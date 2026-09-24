@@ -928,6 +928,40 @@ class ApiTestCase(unittest.TestCase):
             self.client.get("/api/backtest/st_ma_cross?commission_rate=abc"), 400
         )
 
+    def test_17b_backtest_fee_options_reach_fee_config(self):
+        """新费用字段（流量费 / 跳数滑点 / tick 价位 / 手数）能从 HTTP 参数进到 FeeConfig。"""
+        payload = self.check_envelope(
+            self.client.post(
+                "/api/backtest/st_ma_cross",
+                json={
+                    "start": "2024-01-01",
+                    "end": "2024-03-31",
+                    "symbols": ["600519.SH"],
+                    "commission_rate": 0.0003,
+                    "commission_min": 1.0,
+                    "flow_fee": 1.5,
+                    "slippage_bps": 0,
+                    "slippage_ticks": 2,
+                    "tick_size": 0.01,
+                    "lot_size": 100,
+                },
+            )
+        )["data"]
+        fee = payload["request"]["fee"]
+        self.assertAlmostEqual(fee["commission_rate"], 0.0003)
+        self.assertAlmostEqual(fee["commission_min"], 1.0)
+        self.assertAlmostEqual(fee["flow_fee"], 1.5)
+        self.assertAlmostEqual(fee["slippage_bps"], 0.0)
+        self.assertAlmostEqual(fee["slippage_ticks"], 2.0)
+        self.assertAlmostEqual(fee["tick_size"], 0.01)
+        self.assertEqual(int(fee["lot_size"]), 100)
+
+        # 越界与非数字走统一校验（不静默取默认值）
+        self.check_json_error(self.client.get("/api/backtest/st_ma_cross?flow_fee=abc"), 400)
+        self.check_json_error(self.client.get("/api/backtest/st_ma_cross?flow_fee=5000"), 400)
+        self.check_json_error(self.client.get("/api/backtest/st_ma_cross?tick_size=0"), 400)
+        self.check_json_error(self.client.get("/api/backtest/st_ma_cross?slippage_ticks=-1"), 400)
+
     # ------------------------------------------------------------------ ⑦ 持仓与模拟盘
 
     def test_18_portfolio_writes(self):

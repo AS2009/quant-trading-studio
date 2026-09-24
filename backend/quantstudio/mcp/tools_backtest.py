@@ -118,7 +118,8 @@ def _run_options(args: Dict[str, Any]) -> Dict[str, Any]:
         value = args.get(key)
         if value:
             options[key] = str(value)
-    for key in ("initial_cash", "commission_rate", "slippage_bps"):
+    for key in ("initial_cash", "commission_rate", "commission_min", "slippage_bps", "flow_fee",
+                "slippage_ticks", "tick_size", "lot_size"):
         if args.get(key) is not None:
             options[key] = args[key]
     params = args.get("params")
@@ -339,6 +340,12 @@ def register(registry: Any) -> None:
                 "benchmark": p_str("基准代码，如 000300.SH；省略用系统默认", examples=["000300.SH"]),
                 "commission_rate": p_num("佣金费率（小数，如 0.0003 = 万三）", minimum=0.0, maximum=0.05),
                 "slippage_bps": p_num("滑点（基点，1 bp = 万分之一）", minimum=0.0, maximum=500.0),
+                "commission_min": p_num("单笔最低佣金（元，默认 5）", minimum=0.0, maximum=1000.0),
+                "flow_fee": p_num("每笔固定流量费（元，买卖各收一次；默认 0）", minimum=0.0, maximum=1000.0),
+                "slippage_ticks": p_num("跳数滑点（最小变动价位的跳数，与 slippage_bps 叠加；默认 0）",
+                                        minimum=0.0, maximum=100.0),
+                "tick_size": p_num("最小变动价位（元，跳数滑点用；默认 0.01）", minimum=0.0001, maximum=1.0),
+                "lot_size": p_num("最小交易单位（股，默认 100；非 100 股品种可改）", minimum=1.0, maximum=10000.0),
                 "params": p_object("策略参数覆盖，如 {\"short_ma\": 10, \"long_ma\": 30}"),
                 "include_series": p_bool("是否返回净值 / 回撤 / 月度序列（默认 false，只回摘要）", default=False),
                 "include_trades": p_bool("是否返回逐笔成交流水（默认 false，只回摘要）", default=False),

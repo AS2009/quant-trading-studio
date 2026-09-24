@@ -268,7 +268,7 @@ python scripts/run_backtest.py --strategy st_my_alpha --symbols 600519.SH --star
 | GET/POST/DELETE | `/api/watchlist` `/api/watchlist/<code>` | 自选池读写 |
 | GET/POST | `/api/strategies` | 策略列表 / 新建自定义策略 |
 | GET/DELETE | `/api/strategies/<id>` | 策略详情 / 删除 |
-| GET/POST | `/api/backtest/<id>` | 回测（区间、资金、基准、标的、费率、滑点均可传参） |
+| GET/POST | `/api/backtest/<id>` | 回测（区间、资金、基准、标的、费率与滑点均可传参；费率含 `flow_fee` 流量费、`slippage_ticks` 跳数滑点、`lot_size`） |
 | GET | `/api/portfolio/overview` `/holdings` `/equity` | 账户总览 / 持仓 / 权益曲线 |
 | POST/DELETE | `/api/portfolio/holdings` | 录入 / 删除真实持仓 |
 | POST | `/api/portfolio/cash` `/api/portfolio/mode` | 设置现金 / 切换 manual·paper 模式 |

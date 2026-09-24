@@ -131,7 +131,7 @@ const API = {
   deleteStrategy: (id) => API.del("/api/strategies/" + encodeURIComponent(id)),
 
   /* ---------------- 回测 ---------------- */
-  /* params: {start,end,cash,benchmark,symbols,slippage_bps,commission_rate}，symbols 用数组 */
+  /* params: {start,end,cash,benchmark,symbols,slippage_bps,flow_fee,slippage_ticks,commission_rate}，symbols 用数组 */
   backtest: (id, params, opts) =>
     API.get("/api/backtest/" + encodeURIComponent(id) + API.qs(API.backtestQuery(params)), opts),
   runBacktest: (id, params, opts) =>
@@ -145,6 +145,8 @@ const API = {
       benchmark: p.benchmark,
       symbols: Array.isArray(p.symbols) ? p.symbols.join(",") : p.symbols,
       slippage_bps: p.slippage_bps,
+      flow_fee: p.flow_fee,
+      slippage_ticks: p.slippage_ticks,
       commission_rate: p.commission_rate,
     };
   },

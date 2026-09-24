@@ -150,6 +150,8 @@ class BacktestView(BaseView):
         self._symbols_var = tk.StringVar(master=self, value="")
         self._slippage_var = tk.StringVar(master=self, value="2")
         self._commission_var = tk.StringVar(master=self, value="2.5")
+        self._flow_fee_var = tk.StringVar(master=self, value="0")
+        self._ticks_var = tk.StringVar(master=self, value="0")
         self._meta_var = tk.StringVar(master=self, value="")
         self._warn_var = tk.StringVar(master=self, value="")
         self._hint_var = tk.StringVar(master=self, value="选择策略并点击「运行回测」")
@@ -309,28 +311,35 @@ class BacktestView(BaseView):
         ttk.Entry(form, textvariable=self._commission_var, width=14).grid(
             row=5, column=3, sticky="w", padx=(8, 0), pady=2)
 
-        ttk.Label(form, text="标的池", style="CardMuted.TLabel").grid(row=6, column=0, sticky="nw",
+        ttk.Label(form, text="流量费（元/笔）", style="CardMuted.TLabel").grid(row=6, column=0, sticky="w")
+        ttk.Entry(form, textvariable=self._flow_fee_var, width=14).grid(
+            row=6, column=1, sticky="w", padx=(8, 16), pady=2)
+        ttk.Label(form, text="滑点（跳数）", style="CardMuted.TLabel").grid(row=6, column=2, sticky="w")
+        ttk.Entry(form, textvariable=self._ticks_var, width=14).grid(
+            row=6, column=3, sticky="w", padx=(8, 0), pady=2)
+
+        ttk.Label(form, text="标的池", style="CardMuted.TLabel").grid(row=7, column=0, sticky="nw",
                                                                     pady=(8, 0))
         head = ttk.Frame(form, style="Card.TFrame")
-        head.grid(row=6, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
+        head.grid(row=7, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
         ttk.Button(head, text="全选", command=lambda: self._toggle_all(True)).pack(side="left")
         ttk.Button(head, text="全不选", command=lambda: self._toggle_all(False)).pack(side="left",
                                                                                     padx=6)
         ttk.Label(head, text="默认全选自选池；下方可手填补充（逗号分隔）",
                   style="CardMuted.TLabel").pack(side="left", padx=8)
         self._symbol_box = ttk.Frame(form, style="Card.TFrame")
-        self._symbol_box.grid(row=7, column=1, columnspan=3, sticky="ew", padx=(8, 0))
+        self._symbol_box.grid(row=8, column=1, columnspan=3, sticky="ew", padx=(8, 0))
 
-        ttk.Label(form, text="手填标的", style="CardMuted.TLabel").grid(row=8, column=0, sticky="w",
+        ttk.Label(form, text="手填标的", style="CardMuted.TLabel").grid(row=9, column=0, sticky="w",
                                                                      pady=(6, 0))
-        ttk.Entry(form, textvariable=self._symbols_var).grid(row=8, column=1, columnspan=3,
+        ttk.Entry(form, textvariable=self._symbols_var).grid(row=9, column=1, columnspan=3,
                                                             sticky="ew", padx=(8, 0), pady=(6, 0))
         ttk.Label(form, text="例：600519.SH, 000858.SZ（与勾选合并，代码会自动转大写）",
-                  style="CardMuted.TLabel").grid(row=9, column=1, columnspan=3, sticky="w",
+                  style="CardMuted.TLabel").grid(row=10, column=1, columnspan=3, sticky="w",
                                                 padx=(8, 0))
 
         actions = ttk.Frame(form, style="Card.TFrame")
-        actions.grid(row=10, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        actions.grid(row=11, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         self._run_btn = ttk.Button(actions, text="运行回测", style="Primary.TButton",
                                    command=self._run_backtest)
         self._run_btn.pack(side="left")
@@ -658,6 +667,8 @@ class BacktestView(BaseView):
         self._symbols_var.set("")
         self._slippage_var.set("2")
         self._commission_var.set("2.5")
+        self._flow_fee_var.set("0")
+        self._ticks_var.set("0")
         self._toggle_all(True)
         self._hint_var.set("参数已恢复默认")
 
@@ -680,6 +691,12 @@ class BacktestView(BaseView):
         commission_wan = _number(self._commission_var.get())
         if commission_wan is None or commission_wan < 0:
             problems.append("佣金费率需为非负数，单位万分之（当前 %r）" % self._commission_var.get())
+        flow_fee = _number(self._flow_fee_var.get())
+        if flow_fee is None or flow_fee < 0:
+            problems.append("流量费需为非负数，单位元/笔（当前 %r）" % self._flow_fee_var.get())
+        ticks = _number(self._ticks_var.get())
+        if ticks is None or ticks < 0:
+            problems.append("滑点跳数需为非负数，单位跳（当前 %r）" % self._ticks_var.get())
         if problems:
             return None, "；".join(problems)
         symbols = self._collect_symbols()
@@ -690,6 +707,8 @@ class BacktestView(BaseView):
             "benchmark": (self._bench_var.get() or BENCHMARKS[0]).strip() or BENCHMARKS[0],
             "slippage_bps": float(slippage),
             "commission_rate": float(commission_wan) / 10000.0,
+            "flow_fee": float(flow_fee),
+            "slippage_ticks": float(ticks),
         }
         if symbols:
             params["symbols"] = symbols
@@ -769,12 +788,20 @@ class BacktestView(BaseView):
         request = data.get("request") if isinstance(data.get("request"), dict) else {}
         symbols = request.get("symbols") if isinstance(request.get("symbols"), list) else []
         fee = request.get("fee") if isinstance(request.get("fee"), dict) else {}
+        flow_fee = _number(fee.get("flow_fee"), 0.0) or 0.0
+        ticks = _number(fee.get("slippage_ticks"), 0.0) or 0.0
+        fee_extra = ""
+        if flow_fee:
+            fee_extra += " ｜ 流量费 %s 元/笔" % theme.fmt_num(flow_fee, 2)
+        if ticks:
+            fee_extra += " ｜ 跳数滑点 %s 跳" % theme.fmt_num(ticks, 0)
         self._meta_var.set(
-            "区间 %s ~ %s ｜ 策略 %s ｜ 初始资金 %s 元 ｜ 基准 %s ｜ 标的 %s ｜ 佣金 %.5f/滑点 %s bp"
+            "区间 %s ~ %s ｜ 策略 %s ｜ 初始资金 %s 元 ｜ 基准 %s ｜ 标的 %s ｜ 佣金 %.5f/滑点 %s bp%s"
             % (start, end, _text(strategy.get("name"), self._selected_id),
                theme.fmt_money(request.get("initial_cash")), _text(request.get("benchmark")),
                ("、".join(str(code) for code in symbols) or "策略默认"),
-               _number(fee.get("commission_rate"), 0.0) or 0.0, _text(fee.get("slippage_bps"), "0")))
+               _number(fee.get("commission_rate"), 0.0) or 0.0, _text(fee.get("slippage_bps"), "0"),
+               fee_extra))
 
     def _render_metrics(self, metrics: Dict[str, Any]) -> None:
         dd_start = _text(metrics.get("max_drawdown_start"), "")

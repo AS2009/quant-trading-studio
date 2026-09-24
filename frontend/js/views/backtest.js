@@ -266,6 +266,8 @@ const BacktestView = {
       symbols: [],
       slippage_bps: 2,
       commission_wan: 2.5, /* 展示单位：万分之；提交时换算为 commission_rate */
+      flow_fee: 0,
+      slippage_ticks: 0,
     };
   },
 
@@ -290,6 +292,12 @@ const BacktestView = {
         ${UI.field({ id: "bt-commission", name: "commission_wan", label: "佣金费率（万分之）", type: "number",
           value: f.commission_wan, min: 0, max: 30, step: 0.05,
           hint: "提交值 commission_rate = " + fmt.esc(String(Number(f.commission_wan || 0) / 10000)) })}
+        ${UI.field({ id: "bt-flow-fee", name: "flow_fee", label: "流量费（元/笔）", type: "number",
+          value: f.flow_fee, min: 0, max: 100, step: 0.5,
+          hint: "每笔委托固定费用，买卖各收一次；默认 0" })}
+        ${UI.field({ id: "bt-ticks", name: "slippage_ticks", label: "滑点（跳数）", type: "number",
+          value: f.slippage_ticks, min: 0, max: 100, step: 1,
+          hint: "按最小变动价位（0.01 元）的跳数叠加，取对买方不利方向" })}
       </div>
       <div class="form-meta">
         策略：<strong>${fmt.esc(s.name || "—")}</strong>
@@ -319,6 +327,8 @@ const BacktestView = {
     f.benchmark = read("#bt-benchmark");
     f.slippage_bps = read("#bt-slippage", true);
     f.commission_wan = read("#bt-commission", true);
+    f.flow_fee = read("#bt-flow-fee", true);
+    f.slippage_ticks = read("#bt-ticks", true);
     Store.state.backtestForm = f;
     /* 佣金提示实时联动 */
     const hint = c.querySelector("#bt-commission")?.parentElement.querySelector(".field-hint");
@@ -387,6 +397,8 @@ const BacktestView = {
     if (!f.cash || f.cash < 10000) return { field: "#bt-cash", message: "初始资金至少 1 万元" };
     if (f.slippage_bps === null || f.slippage_bps < 0) return { field: "#bt-slippage", message: "滑点不能为负" };
     if (f.commission_wan === null || f.commission_wan < 0) return { field: "#bt-commission", message: "佣金费率不能为负" };
+    if (f.flow_fee === null || f.flow_fee < 0) return { field: "#bt-flow-fee", message: "流量费不能为负" };
+    if (f.slippage_ticks === null || f.slippage_ticks < 0) return { field: "#bt-ticks", message: "滑点跳数不能为负" };
     const max = 20; /* 与后端 symbols 上限保持一致的前端前置校验 */
     if ((f.symbols || []).length > max) {
       return { field: "#bt-symbols", message: "标的池最多 " + max + " 只，请减少选择" };
@@ -421,6 +433,7 @@ const BacktestView = {
       const params = {
         start: f.start, end: f.end, cash: f.cash, benchmark: f.benchmark,
         symbols: f.symbols || [], slippage_bps: f.slippage_bps,
+        flow_fee: f.flow_fee, slippage_ticks: f.slippage_ticks,
         commission_rate: Number(f.commission_wan || 0) / 10000,
       };
       const json = await API.runBacktest(id, params, { timeout: 120000 });
@@ -464,6 +477,8 @@ const BacktestView = {
       "初始资金 " + fmt.num(req.initial_cash, 0) + " 元",
       "费率 " + fmt.num((req.fee && req.fee.commission_rate) !== undefined
         ? req.fee.commission_rate * 10000 : undefined, 2) + "‱",
+      (req.fee && Number(req.fee.flow_fee)) ? "流量费 " + fmt.num(req.fee.flow_fee, 2) + " 元/笔" : "",
+      (req.fee && Number(req.fee.slippage_ticks)) ? "跳数滑点 " + fmt.num(req.fee.slippage_ticks, 0) + " 跳" : "",
     ].filter(Boolean).join(" · ");
 
     /* warnings */

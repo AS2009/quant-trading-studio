@@ -429,11 +429,12 @@ class BacktestViewTest(ViewTestCase):
         params, problem = view._collect_params()
         self.assertEqual(problem, "")
         self.assertEqual(sorted(params.keys()),
-                         ["benchmark", "cash", "commission_rate", "end", "slippage_bps", "start",
-                          "symbols"])
+                         ["benchmark", "cash", "commission_rate", "end", "flow_fee", "slippage_bps",
+                          "slippage_ticks", "start", "symbols"])
         self.assertEqual(params["cash"], 1000000.0)
         self.assertEqual(params["commission_rate"], 2.5 / 10000.0)
         self.assertEqual(params["slippage_bps"], 2.0)
+        self.assertEqual(params["flow_fee"], 0.0)
         self.assertEqual(params["benchmark"], "000300.SH")
         self.assertEqual(params["end"], "")
         self.assertEqual(params["symbols"], ["600519.SH", "000858.SZ", "000001.SZ", "600000.SH"])
@@ -446,6 +447,33 @@ class BacktestViewTest(ViewTestCase):
         view._start_var.set("2024-01-01")
         view._end_var.set("2023-01-01")
         self.assertIn("晚于", view._collect_params()[1])
+
+    def test_params_payload_new_fee_fields(self):
+        """新增费用字段（流量费 / 跳数滑点）随 params 下发，非法输入本地拦截。"""
+        view = self._view()
+        view._flow_fee_var.set("1.5")
+        view._ticks_var.set("3")
+        params, problem = view._collect_params()
+        self.assertEqual(problem, "")
+        self.assertEqual(params["flow_fee"], 1.5)
+        self.assertEqual(params["slippage_ticks"], 3.0)
+
+        view._flow_fee_var.set("abc")
+        params, problem = view._collect_params()
+        self.assertIsNone(params)
+        self.assertIn("流量费", problem)
+        view._flow_fee_var.set("1.5")
+        view._ticks_var.set("-2")
+        params, problem = view._collect_params()
+        self.assertIsNone(params)
+        self.assertIn("滑点跳数", problem)
+
+        # 恢复默认时两个字段归零
+        view._flow_fee_var.set("9")
+        view._ticks_var.set("9")
+        view._restore_defaults()
+        self.assertEqual(view._flow_fee_var.get(), "0")
+        self.assertEqual(view._ticks_var.get(), "0")
 
     def test_pending_strategy_runs_backtest_and_renders(self):
         view = self._view()

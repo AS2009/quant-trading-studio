@@ -878,12 +878,6 @@ class TestExtraMetrics(unittest.TestCase):
                         "既有指标键缺失：%s" % sorted(BASE_METRIC_KEYS - keys))
         self.assertTrue(NEW_METRIC_KEYS.issubset(keys),
                         "新增指标键缺失：%s" % sorted(NEW_METRIC_KEYS - keys))
-        print("\n[metrics] 旧键 %d 个 + 新键 %d 个 = %d 个"
-              % (len(BASE_METRIC_KEYS), len(NEW_METRIC_KEYS), len(keys)))
-        print("[metrics] 真实回测：max_win_streak_days=%s max_loss_streak_days=%s "
-              "best_trade_pct=%s worst_trade_pct=%s daily_trade_avg=%s"
-              % (payload["max_win_streak_days"], payload["max_loss_streak_days"],
-                 payload["best_trade_pct"], payload["worst_trade_pct"], payload["daily_trade_avg"]))
 
         # 连续涨跌天数与真实逐日权益序列互相印证（按日收益率独立重算一遍）
         equity = [item["equity"] for item in result.equity]
