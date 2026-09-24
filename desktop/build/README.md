@@ -163,7 +163,7 @@ onedir 无此开销，直接加载同目录 DLL。追求启动速度就发布 on
 
 **Q7. 版本号在哪里改？**
 `desktop/quantstudio_desktop/__init__.py` 的 `__version__`（界面「关于」显示）；
-Windows 文件属性用 `desktop/build/version_info.txt` 的 `filevers/prodvers/(1, 2, 0, 0)` 与
+Windows 文件属性用 `desktop/build/version_info.txt` 的 `filevers/prodvers/(1, 3, 0, 0)` 与
 `FileVersion/ProductVersion`（发布前手动同步，PyInstaller 不做跨文件校验）。
 
 **Q8. `--selftest` 退出码 1 怎么办？**
