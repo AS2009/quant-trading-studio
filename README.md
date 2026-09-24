@@ -42,10 +42,10 @@ python scripts/fetch_data.py --export-csv          # 导出离线 CSV（断网�
 
 ---
 
-## Windows 桌面版（原生 GUI，无需浏览器）
+## 桌面版（原生 GUI，无需浏览器）：Windows / macOS
 
-同一套核心能力（真实行情 → 策略 → 回测 → 持仓 → 模拟盘）还有**原生 Windows 程序**，
-零第三方 GUI 依赖（只用 Python 标准库 tkinter），可直接编译成 exe 双击运行：
+同一套核心能力（真实行情 → 策略 → 回测 → 持仓 → 模拟盘 / 盘口 L2）还有**原生桌面程序**，
+零第三方 GUI 依赖（只用 Python 标准库 tkinter），Windows 可编译成 exe、macOS 可打包成 `.app`：
 
 ```bat
 cd desktop
@@ -54,10 +54,20 @@ python -m quantstudio_desktop --selftest         :: 无界面自检（数据源/
 powershell -ExecutionPolicy Bypass -File desktop\build\build_windows.ps1   :: 本机打包 exe
 ```
 
-推送代码后 GitHub Actions（`.github/workflows/build-desktop.yml`）会在 **windows-latest** 上用
-PyInstaller 自动编译 onedir + onefile 两种产物，并**对产物跑真实自检**（`--selftest` / `--selftest-gui`
-必须 exit 0）后才上传制品；打 `v*` 标签会自动发布 Release 附件。
-完整说明见 **[docs/desktop-gui.md](docs/desktop-gui.md)**。
+推送代码后 GitHub Actions 会自动编译：`.github/workflows/build-desktop.yml` 在 **windows-latest** 上产出
+onedir + onefile（**对产物跑真实自检**，`--selftest` / `--selftest-gui` 必须 exit 0）；
+`.github/workflows/build-macos.yml` 在 **macos-14** 上产出 universal2 的 `.app` / `.zip` / `.dmg`（ad-hoc 签名）。
+打 `v*` 标签会自动把三种产物附到 Release。
+
+macOS 本机打包（需要 Xcode 命令行工具：`iconutil` / `codesign`）：
+
+```bash
+PYTHON=/usr/bin/python3 ./desktop/build/build_macos.sh        # universal2 + 自检 + zip + dmg
+```
+
+产物在 `desktop/build/output-macos/`（`.app` 约 20 MB，`.dmg` 约 8 MB）；未做开发者签名与公证，
+别人首次打开需右键 →「打开」，或用 `xattr -dr com.apple.quarantine` 去掉隔离标记。
+完整说明见 **[docs/desktop-gui.md](docs/desktop-gui.md)** 与 **[desktop/build/README.md](desktop/build/README.md)**。
 
 ## MCP（给大模型调用）
 
