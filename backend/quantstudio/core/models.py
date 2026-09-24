@@ -11,6 +11,13 @@
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 
+# --------------------------------------------------------------------------- 交易方向
+
+# 买卖方向的规范常量（core.costs 等零业务依赖的模块只从本文件取值，
+# 避免 core 包反向依赖 backtest / strategies 包）
+SIDE_BUY = "buy"
+SIDE_SELL = "sell"
+
 # --------------------------------------------------------------------------- 标的
 
 
@@ -169,7 +176,17 @@ class StrategySpec:
 
 @dataclass
 class FeeConfig:
-    """交易费用（默认按 A 股主流费率，可覆盖）。"""
+    """交易费用（默认按 A 股主流费率，可覆盖）。
+
+    口径的**唯一实现**在 :mod:`quantstudio.core.costs`（``exec_price`` / ``order_cost``）：
+
+    - 佣金 ``max(成交额 × commission_rate, commission_min)``，双边；
+    - 印花税 ``成交额 × stamp_duty_rate``，**仅卖出**；
+    - 过户费 ``成交额 × transfer_fee_rate``，双边（沪深已统一）；
+    - 流量费 ``flow_fee``：**每笔固定**（买卖各收一次），默认 0 元 = 与旧行为一致；
+    - 滑点：``slippage_bps``（比例，双边计入成交价）与 ``slippage_ticks × tick_size``
+      （按最小变动价位的跳数）**叠加**，默认跳数 0 时退化为纯比例滑点。
+    """
 
     commission_rate: float = 0.00025     # 佣金：双边万分之 2.5
     commission_min: float = 5.0          # 单笔最低 5 元
@@ -177,6 +194,9 @@ class FeeConfig:
     transfer_fee_rate: float = 0.00001   # 过户费：双边 0.001%（沪深已统一）
     slippage_bps: float = 2.0            # 滑点（基点，双边计入成交价）
     lot_size: int = 100                  # 最小交易单位（股）
+    flow_fee: float = 0.0                # 每笔固定流量费（元，买卖各收一次；0 = 与旧行为一致）
+    slippage_ticks: float = 0.0          # 滑点（最小变动价位的跳数，与 slippage_bps 叠加）
+    tick_size: float = 0.01              # 价格最小变动单位（元，A 股 0.01 元）
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

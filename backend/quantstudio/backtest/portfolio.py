@@ -18,11 +18,11 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
+from ..core.costs import EPS as _EPS          # 与 costs 的资金校验同一容差（单一来源）
 from ..core.errors import OrderRejected, ValidationError
 from ..core.models import Trade
 
-# 资金校验容差（浮点误差，避免“差一分钱”被拒单）
-_EPS = 1e-6
+# 资金校验容差见 quantstudio.core.costs.EPS（避免两侧各写一个常量而漂移）
 
 SIDE_BUY = "buy"
 SIDE_SELL = "sell"
@@ -211,6 +211,8 @@ class SimAccount:
                 pos.name = name
             pos.mark(self._fill_price_or_last(code, price))
             self.cash -= total
+            if -_EPS < self.cash < 0.0:      # 容差内的浮点噪声（如 -8.9e-16）→ 归零，保证现金非负
+                self.cash = 0.0
             trade = Trade(
                 date=date, code=code, name=pos.name or code, side=SIDE_BUY,
                 price=_round2(price), qty=qty, amount=_round2(amount), fee=_round2(fee),

@@ -12,15 +12,17 @@
 """
 
 import math
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from ..core import costs
 from ..core.errors import ValidationError
-from ..core.models import Bar, OrderRequest, Position, StrategySpec
+from ..core.models import Bar, FeeConfig, OrderRequest, Position, StrategySpec
 
 SIDE_BUY = "buy"
 SIDE_SELL = "sell"
 
-# 买入时的费用/滑点预留系数（0.1%）：避免策略给出的整手数量因费用被砍掉一手
+# 买入时的费用/滑点预留系数（0.1%）：**只在拿不到费率信息时**兜底。
+# 上下文暴露 fee_config() 时（回测上下文都有）改走 core.costs.max_buy_qty 精确反解。
 _FEE_BUFFER = 0.999
 
 
@@ -32,6 +34,46 @@ def _to_float(value: Any) -> Optional[float]:
     if math.isnan(num) or math.isinf(num):
         return None
     return num
+
+
+def _numbers(values: Any) -> List[float]:
+    """把序列转成浮点列表；含无法解析的值（None / NaN / 非数字）时返回空列表。
+
+    指标函数据此返回 ``None``/``[]``：宁可说「数据不够」，也不要算出被污染的结果
+    （典型场景：停牌日的高开低收是 NaN、财报字段缺失）。
+    """
+    out: List[float] = []
+    for value in values or []:
+        number = _to_float(value)
+        if number is None:
+            return []
+        out.append(number)
+    return out
+
+def _fee_config(ctx) -> Any:
+    """取上下文的费率配置（``fee_config()``）；拿不到或类型不符时返回 ``None``。"""
+    getter = getattr(ctx, "fee_config", None)
+    if not callable(getter):
+        return None
+    try:
+        fee = getter()
+    except Exception:                                  # 第三方上下文实现异常 → 退化估算
+        return None
+    return fee if isinstance(fee, (FeeConfig, dict)) else None
+
+def _lot_size(ctx, fallback: int) -> int:
+    """当前账户的最小交易单位：优先用上下文（账户真实口径），否则退回策略自身的 ``lot_size``。
+
+    买卖两侧必须用**同一个**来源，否则「买入按 10 股、卖出按 100 股」会让小仓位永远卖不掉。
+    """
+    for value in (getattr(ctx, "lot_size", None), fallback):
+        try:
+            lot = int(value)
+        except (TypeError, ValueError):
+            continue
+        if lot > 0:
+            return lot
+    return 100
 
 
 def _coerce_param(strategy_id: str, key: str, value: Any, meta: Dict[str, Any]) -> Any:
@@ -203,14 +245,25 @@ class BaseStrategy:
 
     # ------------------------------------------------------------------ 下单助手
     def max_buy_qty(self, ctx, price: float, pct: float = 1.0) -> int:
-        """按可用资金 × pct 能买入的最大整手数（预留 0.1% 费用/滑点，broker 会再校验）。"""
+        """按可用资金 × pct 能买入的最大整手数（**含滑点与全部费用**，与 broker 同口径）。
+
+        ``ctx`` 暴露 :meth:`fee_config`（回测上下文都有）时按费率精确反解；拿不到费率信息
+        的第三方上下文退化为预留 ``_FEE_BUFFER``（0.1%）的估算（broker 仍会兜底缩量）。
+        """
         price = _to_float(price) or 0.0
         pct = _to_float(pct) or 0.0
         if price <= 0 or pct <= 0:
             return 0
-        budget = float(ctx.cash()) * min(max(pct, 0.0), 1.0) * _FEE_BUFFER
-        qty = int(budget / price // self.lot_size) * self.lot_size
-        return max(qty, 0)
+        budget = float(ctx.cash()) * min(max(pct, 0.0), 1.0)
+        if budget <= 0:
+            return 0
+        lot = _lot_size(ctx, self.lot_size)
+        fee = _fee_config(ctx)
+        if fee is None:
+            qty = int(budget * _FEE_BUFFER / price // lot) * lot
+            return max(qty, 0)
+        return costs.max_buy_qty(price, budget, fee, lot)
+        return costs.max_buy_qty(price, budget, fee, lot)
 
     def buy_order(self, ctx, code: str, price: float, pct: float = 1.0, reason: str = "") -> Optional[OrderRequest]:
         qty = self.max_buy_qty(ctx, price, pct)
@@ -222,10 +275,11 @@ class BaseStrategy:
         pos = ctx.position(code)
         if pos is None:
             return None
+        lot = _lot_size(ctx, self.lot_size)
         available = int(pos.available_qty)
         if qty is not None:
             available = min(available, int(qty))
-        available = available // self.lot_size * self.lot_size
+        available = available // lot * lot
         if available <= 0:
             return None
         return OrderRequest(code=code, side=SIDE_SELL, qty=available, price=None, reason=reason)
@@ -347,6 +401,271 @@ class BaseStrategy:
         for tr in trs[n:]:
             value = (value * (n - 1) + tr) / n
         return value
+
+    # ------------------------------------------------------------------ 指标助手（二）：序列与常用复合指标
+    # 全部按公开定义独立实现（与通达信/MyTT 同口径），约定与上面一致：**取最后一根的值**；
+    # 需要「前一根」做金叉判断时，用 self.cross(...) 或自己传 values[:-1]。
+
+    @staticmethod
+    def ref(values: Sequence[float], n: int = 1) -> Optional[float]:
+        """``n`` 根之前的值（``ref(values, 1)`` = 上一根）；数据不足返回 None。"""
+        n = int(n or 0)
+        if n < 0 or len(values) < n + 1:
+            return None
+        return _to_float(values[-1 - n])
+
+    @staticmethod
+    def cross(a: Sequence[float], b: Sequence[float]) -> bool:
+        """``a`` 上穿 ``b``（上一根 a ≤ b，最新一根 a > b）。"""
+        a0, a1 = BaseStrategy.ref(a, 1), (_to_float(a[-1]) if a else None)
+        b0, b1 = BaseStrategy.ref(b, 1), (_to_float(b[-1]) if b else None)
+        if None in (a0, a1, b0, b1):
+            return False
+        return bool(a0 <= b0 and a1 > b1)
+
+    @staticmethod
+    def cross_under(a: Sequence[float], b: Sequence[float]) -> bool:
+        """``a`` 下穿 ``b``（上一根 a ≥ b，最新一根 a < b）。"""
+        a0, a1 = BaseStrategy.ref(a, 1), (_to_float(a[-1]) if a else None)
+        b0, b1 = BaseStrategy.ref(b, 1), (_to_float(b[-1]) if b else None)
+        if None in (a0, a1, b0, b1):
+            return False
+        return bool(a0 >= b0 and a1 < b1)
+
+    @staticmethod
+    def ema_series(values: Sequence[float], n: int) -> List[float]:
+        """整条 EMA 序列（种子 = 第一个值，``alpha = 2/(n+1)``）；数据不足返回 ``[]``。
+
+        自己组合指标（例如「EMA 之差再做 EMA」）时用这个，比反复调用 ``ema`` 方便。
+        """
+        n = int(n or 0)
+        nums = _numbers(values)
+        if n <= 0 or len(nums) < n:
+            return []
+        alpha = 2.0 / (n + 1.0)
+        out = [nums[0]]
+        for value in nums[1:]:
+            out.append(out[-1] + alpha * (value - out[-1]))
+        return out
+
+    @staticmethod
+    def sma_series(values: Sequence[float], n: int, m: int = 1) -> List[float]:
+        """整条「中国式 SMA」（``Y = (M·X + (N−M)·Y') / N``，即 ``alpha = M/N``）。
+
+        KDJ、RSI 等递推型指标都基于它；种子 = 第一个值。数据不足返回 ``[]``。
+        """
+        n = int(n or 0)
+        m = int(m or 0)
+        nums = _numbers(values)
+        if n <= 0 or m <= 0 or m > n or len(nums) < n:
+            return []
+        alpha = float(m) / float(n)
+        out = [nums[0]]
+        for value in nums[1:]:
+            out.append(out[-1] + alpha * (value - out[-1]))
+        return out
+
+    @staticmethod
+    def sma(values: Sequence[float], n: int = 14, m: int = 1) -> Optional[float]:
+        """「中国式 SMA」的最新值（见 :meth:`sma_series`）。"""
+        series = BaseStrategy.sma_series(values, n, m)
+        return series[-1] if series else None
+
+    @staticmethod
+    def macd(values: Sequence[float], fast: int = 12, slow: int = 26,
+             signal: int = 9) -> Optional[Tuple[float, float, float]]:
+        """MACD → ``(DIF, DEA, HIST)``；``HIST = 2 × (DIF − DEA)``（与国内软件口径一致）。"""
+        fast, slow, signal = int(fast or 0), int(slow or 0), int(signal or 0)
+        nums = _numbers(values)
+        if min(fast, slow, signal) <= 0 or fast >= slow or len(nums) < slow + signal:
+            return None
+        ema_fast = BaseStrategy.ema_series(nums, fast)
+        ema_slow = BaseStrategy.ema_series(nums, slow)
+        if not ema_fast or not ema_slow:
+            return None
+        dif_series = [a - b for a, b in zip(ema_fast[-len(ema_slow):], ema_slow)]
+        dea_series = BaseStrategy.ema_series(dif_series, signal)
+        if not dea_series:
+            return None
+        dif, dea = dif_series[-1], dea_series[-1]
+        return round(dif, 6), round(dea, 6), round(2.0 * (dif - dea), 6)
+
+    @staticmethod
+    def kdj(highs: Sequence[float], lows: Sequence[float], closes: Sequence[float],
+            n: int = 9, k: int = 3, d: int = 3) -> Optional[Tuple[float, float, float]]:
+        """KDJ → ``(K, D, J)``。
+
+        ``RSV = (C − LLV(L,n)) / (HHV(H,n) − LLV(L,n)) × 100``（区间为 0 时取中值 50），
+        ``K = SMA(RSV, k, 1)``、``D = SMA(K, d, 1)``、``J = 3K − 2D``。
+        """
+        n, k, d = int(n or 0), int(k or 0), int(d or 0)
+        hs, ls, cs = _numbers(highs), _numbers(lows), _numbers(closes)
+        if min(n, k, d) <= 0 or min(len(hs), len(ls), len(cs)) < n:
+            return None
+        rsv: List[float] = []
+        for i in range(n - 1, len(cs)):
+            hh = max(hs[i - n + 1:i + 1])
+            ll = min(ls[i - n + 1:i + 1])
+            rsv.append(50.0 if hh <= ll else (cs[i] - ll) / (hh - ll) * 100.0)
+        k_series = BaseStrategy.sma_series(rsv, k, 1)
+        if not k_series:
+            return None
+        d_series = BaseStrategy.sma_series(k_series, d, 1)
+        if not d_series:
+            return None
+        kk, dd = k_series[-1], d_series[-1]
+        return round(kk, 4), round(dd, 4), round(3.0 * kk - 2.0 * dd, 4)
+
+    @staticmethod
+    def boll(values: Sequence[float], n: int = 20,
+             k: float = 2.0) -> Optional[Tuple[float, float, float]]:
+        """布林带 → ``(上轨, 中轨, 下轨)``；标准差用**总体**口径（与通达信一致）。"""
+        n = int(n or 0)
+        k = float(k or 0.0)
+        nums = _numbers(values)
+        if n <= 1 or len(nums) < n:
+            return None
+        window = nums[-n:]
+        mid = sum(window) / n
+        var = sum((v - mid) ** 2 for v in window) / n
+        std = var ** 0.5
+        return round(mid + k * std, 6), round(mid, 6), round(mid - k * std, 6)
+
+    @staticmethod
+    def cci(highs: Sequence[float], lows: Sequence[float], closes: Sequence[float],
+            n: int = 14) -> Optional[float]:
+        """CCI（顺势指标）；``TP = (H+L+C)/3``，平均绝对偏差为 0 时返回 0。"""
+        n = int(n or 0)
+        hs, ls, cs = _numbers(highs), _numbers(lows), _numbers(closes)
+        if n <= 0 or min(len(hs), len(ls), len(cs)) < n:
+            return None
+        tp = [(h + l + c) / 3.0 for h, l, c in zip(hs[-n:], ls[-n:], cs[-n:])]
+        ma = sum(tp) / n
+        md = sum(abs(v - ma) for v in tp) / n
+        if md <= 0:
+            return 0.0
+        return round((tp[-1] - ma) / (0.015 * md), 4)
+
+    @staticmethod
+    def wr(highs: Sequence[float], lows: Sequence[float], closes: Sequence[float],
+           n: int = 14) -> Optional[float]:
+        """威廉指标 W%R（取负值，范围 −100~0）；区间为 0 时返回 None。"""
+        n = int(n or 0)
+        hs, ls, cs = _numbers(highs), _numbers(lows), _numbers(closes)
+        if n <= 0 or min(len(hs), len(ls), len(cs)) < n:
+            return None
+        hh = max(hs[-n:])
+        ll = min(ls[-n:])
+        if hh <= ll:
+            return None
+        return round((hh - cs[-1]) / (hh - ll) * -100.0, 4)
+
+    @staticmethod
+    def bias(values: Sequence[float], n: int = 6) -> Optional[float]:
+        """乖离率 BIAS（%）：``(C − MA(C,n)) / MA(C,n) × 100``。"""
+        n = int(n or 0)
+        nums = _numbers(values)
+        if n <= 0 or len(nums) < n:
+            return None
+        ma = sum(nums[-n:]) / n
+        if ma == 0:
+            return None
+        return round((nums[-1] - ma) / ma * 100.0, 4)
+
+    @staticmethod
+    def obv(closes: Sequence[float], volumes: Sequence[float]) -> Optional[float]:
+        """能量潮 OBV 的最新值：上涨累加成交量、下跌累减、平盘不变。"""
+        cs, vs = _numbers(closes), _numbers(volumes)
+        n = min(len(cs), len(vs))
+        if n < 2:
+            return None
+        total = 0.0
+        for i in range(1, n):
+            if cs[i] > cs[i - 1]:
+                total += vs[i]
+            elif cs[i] < cs[i - 1]:
+                total -= vs[i]
+        return round(total, 4)
+
+    @staticmethod
+    def adx(highs: Sequence[float], lows: Sequence[float], closes: Sequence[float],
+            n: int = 14) -> Optional[Tuple[float, float, float]]:
+        """DMI 的 ``(ADX, +DI, −DI)``：TR / +DM / −DM 先做 Wilder 平滑，再算 DX 与 ADX。"""
+        n = int(n or 0)
+        hs, ls, cs = _numbers(highs), _numbers(lows), _numbers(closes)
+        size = min(len(hs), len(ls), len(cs))
+        if n <= 0 or size < 2 * n + 1:
+            return None
+        trs: List[float] = []
+        plus_dm: List[float] = []
+        minus_dm: List[float] = []
+        for i in range(1, size):
+            up = hs[i] - hs[i - 1]
+            down = ls[i - 1] - ls[i]
+            trs.append(max(hs[i] - ls[i], abs(hs[i] - cs[i - 1]), abs(ls[i] - cs[i - 1])))
+            plus_dm.append(up if (up > down and up > 0) else 0.0)
+            minus_dm.append(down if (down > up and down > 0) else 0.0)
+
+        def _wilder(values: List[float]) -> List[float]:
+            smooth = sum(values[:n])
+            out = [smooth]
+            for value in values[n:]:
+                smooth = smooth - smooth / n + value
+                out.append(smooth)
+            return out
+
+        tr_s, plus_s, minus_s = _wilder(trs), _wilder(plus_dm), _wilder(minus_dm)
+        dx: List[float] = []
+        for tr_v, p_v, m_v in zip(tr_s, plus_s, minus_s):
+            if tr_v <= 0:
+                dx.append(0.0)
+                continue
+            plus_di = 100.0 * p_v / tr_v
+            minus_di = 100.0 * m_v / tr_v
+            total = plus_di + minus_di
+            dx.append(0.0 if total <= 0 else 100.0 * abs(plus_di - minus_di) / total)
+        if len(dx) < n:
+            return None
+        adx_value = sum(dx[:n]) / n
+        for value in dx[n:]:
+            adx_value = (adx_value * (n - 1) + value) / n
+        tr_last = tr_s[-1]
+        plus_di_last = 0.0 if tr_last <= 0 else 100.0 * plus_s[-1] / tr_last
+        minus_di_last = 0.0 if tr_last <= 0 else 100.0 * minus_s[-1] / tr_last
+        return round(adx_value, 4), round(plus_di_last, 4), round(minus_di_last, 4)
+
+    @staticmethod
+    def trix(values: Sequence[float], n: int = 12,
+             m: int = 9) -> Optional[Tuple[float, float]]:
+        """TRIX → ``(TRIX, MATRIX)``：三重 EMA 的变化率（%）与其 ``m`` 日均线。"""
+        n, m = int(n or 0), int(m or 0)
+        if n <= 0 or m <= 0:
+            return None
+        series = BaseStrategy.ema_series(values, n)
+        for _ in range(2):
+            series = BaseStrategy.ema_series(series, n)
+            if not series:
+                return None
+        if len(series) < 2:
+            return None
+        trix_series: List[float] = []
+        for i in range(1, len(series)):
+            prev = series[i - 1]
+            trix_series.append(0.0 if prev == 0 else (series[i] - prev) / prev * 100.0)
+        if len(trix_series) < m:
+            return None
+        return round(trix_series[-1], 4), round(sum(trix_series[-m:]) / m, 4)
+
+    @staticmethod
+    def psy(closes: Sequence[float], n: int = 12) -> Optional[float]:
+        """心理线 PSY：最近 ``n`` 根里上涨根数占比 × 100（%）。"""
+        n = int(n or 0)
+        nums = _numbers(closes)
+        if n <= 0 or len(nums) < n + 1:
+            return None
+        window = nums[-(n + 1):]
+        ups = sum(1 for i in range(1, len(window)) if window[i] > window[i - 1])
+        return round(ups * 100.0 / n, 4)
 
     # ------------------------------------------------------------------ 展示
     def describe(self) -> Dict[str, Any]:

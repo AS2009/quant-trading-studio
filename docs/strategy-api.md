@@ -71,13 +71,14 @@
 |---|---|
 | `self.buy_order(ctx, code, price, pct=1.0, reason="")` → `OrderRequest \| None` | 按「可用资金 × pct」能买的最大整手数生成市价买单；数量为 0 时返回 `None` |
 | `self.sell_order(ctx, code, qty=None, reason="")` → `OrderRequest \| None` | 卖出可卖数量的整手；不传 `qty` 即全部清仓；无可卖数量返回 `None` |
-| `self.max_buy_qty(ctx, price, pct=1.0)` → `int` | 只算数量、不下单（需要自定义数量逻辑时使用） |
+| `self.max_buy_qty(ctx, price, pct=1.0)` → `int` | 只算数量、不下单（需要自定义数量逻辑时使用）；**含滑点与全部费用**精确反解，与撮合同口径 |
 
 `OrderRequest` 字段：`code`、`side`（`buy`/`sell`）、`qty`、`price`（`None` = 市价）、`reason`（会展示在交易记录里，**建议写清触发原因**）。
 
 引擎对委托的处理（决定了你写策略时的假设）：市价单按当日收盘价 ± 滑点成交；数量向下取整到 100 股；
-买入受可用资金限制（不足自动缩量，缩到 0 则放弃）；卖出受 T+1 与可卖数量限制；
-`|当日涨跌幅| ≥ 9.8%` 视为封板方向不可成交；费用按佣金/印花税/过户费计算（见根 README「回测口径」）。
+买入受可用资金限制（按**含费用与滑点**的精确上限自动缩量，缩到 0 则放弃）；卖出受 T+1 与可卖数量限制；
+`|当日涨跌幅| ≥ 9.8%` 视为封板方向不可成交；费用按佣金 / 印花税（仅卖出）/ 过户费 / 每笔固定流量费计算
+（费率与滑点由 `FeeConfig` 决定，见根 README「回测口径」）。
 
 ### 3.3 指标助手（纯标准库实现，数据不足返回 `None`）
 
@@ -91,8 +92,47 @@
 | `self.rsi(values, n=14)` | RSI（Wilder 平滑），0–100 |
 | `self.atr(bars, n=14)` | ATR（Wilder 平滑），输入为 `ctx.bars_since(...)` 的 `List[Bar]` |
 
-> 所有助手都接受「升序、最后一根是今日」的序列（即 `ctx.history` 的返回值）。
-> 返回值一律为 `None` 表示数据不足，**必须先判空**（`lint` 的烟雾回测会暴露未判空的 `TypeError`）。
+**工具与序列**（自写实现，口径与通达信/MyTT 一致）：
+
+| 方法 | 说明 |
+|---|---|
+| `self.ref(values, n=1)` | `n` 根之前的值（`ref(values, 1)` = 上一根） |
+| `self.cross(a, b)` / `self.cross_under(a, b)` | 上穿 / 下穿（`a`、`b` 通常是两条序列，如收盘价与均线） |
+| `self.ema_series(values, n)` / `self.sma_series(values, n, m=1)` | **整条** EMA / 中国式 SMA 序列（自己组合指标时用） |
+| `self.sma(values, n=14, m=1)` | 中国式 SMA 的最新值（KDJ/RSI 类递推指标的基础） |
+
+**复合指标**（一次算好、直接拿来判断；都用上面同一套序列约定）：
+
+| 方法 | 返回 | 说明 |
+|---|---|---|
+| `self.macd(values, fast=12, slow=26, signal=9)` | `(DIF, DEA, HIST)` | `HIST = 2×(DIF−DEA)`（国内软件口径） |
+| `self.kdj(highs, lows, closes, n=9, k=3, d=3)` | `(K, D, J)` | `J = 3K−2D`；区间为 0 时 RSV 取中值 50 |
+| `self.boll(values, n=20, k=2)` | `(上轨, 中轨, 下轨)` | 标准差用**总体**口径（与通达信一致） |
+| `self.cci(highs, lows, closes, n=14)` | `float` | 顺势指标；平均绝对偏差为 0 时返回 0 |
+| `self.wr(highs, lows, closes, n=14)` | `float` | 威廉 %R（−100~0，越接近 0 越靠区间高位） |
+| `self.bias(values, n=6)` | `float` | 乖离率（%，`(C−MA)/MA×100`） |
+| `self.obv(closes, volumes)` | `float` | 能量潮最新值（涨加量、跌减量、平不变） |
+| `self.adx(highs, lows, closes, n=14)` | `(ADX, +DI, −DI)` | DMI：TR/+DM/−DM 走 Wilder 平滑 |
+| `self.trix(values, n=12, m=9)` | `(TRIX, MATRIX)` | 三重 EMA 的变化率（%）与其均线 |
+| `self.psy(closes, n=12)` | `float` | 心理线（最近 n 根上涨占比 %） |
+
+典型用法（金叉买入；`cross` 的入参是「前一根、当根」两个点组成的短序列）：
+
+```python
+closes = ctx.history(code, "close", 120)
+if len(closes) >= 60:
+    dif, dea, hist = self.macd(closes)          # 数据不足返回 None，必须先判空
+    if dif is not None:
+        # 前一根、当根各算一次，交给 cross 判断是否上穿
+        ma5 = [self.ma(closes[:-1], 5), self.ma(closes, 5)]
+        ma20 = [self.ma(closes[:-1], 20), self.ma(closes, 20)]
+        if self.cross(ma5, ma20):
+            orders.append(self.buy_order(ctx, code, ctx.price(code), 0.5, "MA5 上穿 MA20"))
+```
+
+> `highs`/`lows`/`volumes` 用 `ctx.history(code, "high", n)` 这样取即可（字段名与 K 线一致）。
+> 所有助手都接受「升序、最后一根是今日」的序列；返回 `None` 表示数据不足，**必须先判空**
+> （`lint` 的烟雾回测会暴露未判空的 `TypeError`）。
 
 ### 3.4 运行时与调试
 

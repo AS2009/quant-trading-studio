@@ -168,14 +168,22 @@ quant-trading-studio/
 ## 回测口径（务必了解，避免误读结果）
 
 - **数据**：前复权日线（`adjust=qfq`），按标的共同交易日对齐，停牌当日不做交易；
-- **撮合**：默认市价单以**当日收盘价**成交（可按需改为开盘价模型），成交价计入滑点（默认 2bp，买入上浮/卖出下浮）；
-- **费用**（`FeeConfig`，可覆盖）：佣金万 2.5（单笔最低 5 元）、印花税卖出 0.05%、过户费双边 0.001%；
+- **撮合**：默认市价单以**当日收盘价**成交（可按需改为开盘价模型），成交价计入滑点 —— `slippage_bps`
+  （比例，默认 2bp，买入上浮/卖出下浮）与 `slippage_ticks × tick_size`（最小变动价位的跳数）**叠加**，
+  并按 tick 取整到**对买方不利**的方向；
+- **费用**（`FeeConfig`，可覆盖）：佣金万 2.5（单笔最低 5 元）、印花税卖出 0.05%、过户费双边 0.001%、
+  流量费 `flow_fee`（**每笔固定**，默认 0 元，买卖各收一次，兼容旧口径）；
+- **买入量反解**：`core/costs.max_buy_qty` 按可用资金**含滑点与全部费用**精确反解整手数，
+  策略 `self.max_buy_qty()` 与撮合的资金缩量共用同一实现（费率再高也不会「策略算得出、撮合买不进」）；
+- **模拟盘同口径**：`trading/paper.py` 的成交价与费用同样走 `core/costs`（流量费、tick 滑点都生效），
+  回测与模拟盘不会出现两套算法（`trading.broker_base.compute_fee` 已改为复用它）；
 - **交易约束**：买入数量向下取整到 100 股整数倍；卖出受 **T+1**（当日买入次日可卖）与可卖数量限制；
   **涨跌停不成交**（|当日涨跌幅| ≥ 9.8% 视为封板，封板方向无法成交）；资金不足时自动缩量，缩到 0 则放弃；
 - **无未来函数**：策略只能通过 `ctx.history()` 读取**截至当日**的数据（引擎层保证，测试中有专项校验）；
 - **绩效口径**：年化收益 = (1+累计收益)^(252/交易日数) − 1（几何）；年化波动 = 日收益标准差×√252；
   夏普 = (年化收益 − 无风险利率)/年化波动（默认无风险利率 0）；索提诺用下行波动；卡玛 = 年化收益/最大回撤；
   最大回撤 = max(1 − 权益/历史峰值) 并给出起止日期；胜率与盈亏比按**平仓交易**统计；Alpha/Beta 用日收益对基准回归；
+  另有最长连涨/连跌交易日数、单笔平仓收益极值（FIFO 配对）、日均交易次数（**共 25 项**，字段见 `backtest/metrics.py`）；
 - **结果可复现**：相同输入 → 完全相同输出（无随机数、无集合遍历顺序依赖）。
 
 ---
@@ -206,10 +214,11 @@ python scripts/run_backtest.py --strategy st_my_alpha --symbols 600519.SH --star
 |---|---|
 | [`docs/strategy-spec.md`](docs/strategy-spec.md) | 命名、目录结构、文件格式、必守规则 R1–R12、校验要求、检查清单 |
 | [`docs/strategy-api.md`](docs/strategy-api.md) | `ctx` 上下文、`BaseStrategy` 助手、参数 schema、可用导入清单 |
-| [`docs/strategy-examples.md`](docs/strategy-examples.md) | 两个完整示例（单标的突破 / 多标的轮动）+ 常见错误对照 |
+| [`docs/strategy-examples.md`](docs/strategy-examples.md) | 三个完整示例（单标的突破 / 多标的轮动 / 多指标共振）+ 常见错误对照 |
 | [`docs/ai-strategy-guide.md`](docs/ai-strategy-guide.md) | 用 AI 写策略的提示词模板、修复动作表、交付格式 |
 
-`local/` 下已附带两个通过校验的示例：`st_breakout_atr`（通道突破 + ATR 止损）、`st_rotation_topn`（动量轮动 TopN）。
+`local/` 下已附带三个通过校验的示例：`st_breakout_atr`（通道突破 + ATR 止损）、`st_rotation_topn`（动量轮动 TopN）、
+`st_macd_adx`（MACD 金叉 + ADX 趋势过滤 + 布林中轨离场，演示 `macd/kdj/boll/adx/cross` 等新指标怎么用）。
 加载失败的文件只会在 `/api/system/status` 的 `local.errors` 中记录，不会影响应用启动。
 
 > 策略只是**示例实现**，用于演示框架如何工作；它们没有经过参数寻优，不代表可盈利。请自行研究、验证与小资金实测。

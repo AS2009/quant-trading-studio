@@ -14,6 +14,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # backend/
 
 from quantstudio.config import Settings                                          # noqa: E402
+from quantstudio.backtest.broker import SimulatedBroker                                    # noqa: E402
+from quantstudio.core import costs                                                          # noqa: E402
 from quantstudio.core.errors import BrokerUnavailable, DataSourceError, ValidationError  # noqa: E402
 from quantstudio.core.models import FeeConfig, OrderRequest, Quote               # noqa: E402
 from quantstudio.portfolio import PortfolioService                               # noqa: E402
@@ -170,6 +172,26 @@ class TradingTestCase(unittest.TestCase):
         self.assertAlmostEqual(broker.account().cash, 100_000.0 - 5.01 - 5.51, places=6)
         # 无涨跌价差时，累计盈亏 = -(买入费 + 卖出费)
         self.assertAlmostEqual(broker.account().total_pnl, -10.52, places=6)
+
+    def test_flow_fee_and_tick_slippage_follow_backtest_convention(self):
+        """模拟盘与回测共用 ``core.costs``：流量费生效、tick 滑点生效、费用逐分一致。"""
+        cfg = FeeConfig(flow_fee=1.5, slippage_ticks=1.0, tick_size=0.01)
+        broker, _, _ = self.make_broker(cash=100_000.0, prices={"600519.SH": 10.0}, slippage=0.0)
+        broker.fee = cfg
+
+        buy = broker.submit(OrderRequest(code="600519.SH", side="buy", qty=100))
+        self.assertEqual(buy.status, "filled")
+        # 成交价 = 基准价 + 1 跳（比例滑点由模拟盘的 slippage_bps=0 提供）
+        self.assertAlmostEqual(buy.avg_price, 10.01, places=6)
+        self.assertAlmostEqual(buy.avg_price,
+                               costs.exec_price("buy", 10.0, FeeConfig(slippage_bps=0.0, slippage_ticks=1.0)),
+                               places=6)
+        # 费用 = 佣金 5.00 + 过户费 0.01 + 流量费 1.50（与回测 calc_fee 完全一致）
+        amount = round(buy.avg_price * 100, 2)
+        self.assertAlmostEqual(buy.fee, 6.51, places=6)
+        self.assertAlmostEqual(buy.fee, costs.fee_total("buy", amount, cfg), places=6)
+        self.assertAlmostEqual(buy.fee, SimulatedBroker(cfg).calc_fee("buy", amount), places=6)
+        self.assertAlmostEqual(compute_fee(amount, "buy", cfg), buy.fee, places=6)
 
     # ④ 限价单挂单 / 撤单
 

@@ -27,6 +27,11 @@
 盈亏比                 平均盈利 / |平均亏损|（缺盈利或缺亏损 → 0）
 交易次数（trade_count） 平仓笔数（卖出且 ``pnl`` 非空）
 换手率                 总成交额 / 平均总资产（平均总资产 = 逐日权益均值）
+最长连涨天数            日收益率 > 0 的最长**连续**交易日数（日收益率 = 0 或前值非正视为打断）
+最长连跌天数            日收益率 < 0 的最长**连续**交易日数（日收益率 = 0 或前值非正视为打断）
+最大/最小单笔收益      ``trades`` 按标的 **FIFO 配对**后的单笔平仓收益率极值（百分数，正数 = 盈利）
+                        买入成本 = 成交额 + 费用，卖出净额 = 成交额 - 费用；没有完整配对 → ``None``
+日均交易次数            ``len(trades) / max(1, 交易天数)``（保留 2 位小数）
 基准收益               ``benchmark_equity[-1] / benchmark_equity[0] - 1``
 Beta                   ``cov(策略日收益, 基准日收益) / var(基准日收益)``（样本矩 n-1；基准方差 0 → 0）
 Alpha                  ``(策略年化 - 无风险) - beta × (基准年化 - 无风险)``
@@ -34,7 +39,8 @@ Alpha                  ``(策略年化 - 无风险) - beta × (基准年化 - �
 """
 
 import math
-from typing import Any, Dict, List, Optional, Sequence
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..core.models import BacktestMetrics, Trade
 
@@ -140,6 +146,120 @@ def _drawdown(dates: Sequence[str], equity: Sequence[float]):
     return worst, worst_start, worst_end, series
 
 
+# --------------------------------------------------------------------------- 扩展指标（新增键）
+@dataclass
+class ExtendedMetrics(BacktestMetrics):
+    """``BacktestMetrics``（``core/models.py``，原有 20 个字段）+ 4 项新增指标（5 个键）。
+
+    用**子类**承载新增字段是为了不改动 ``models.py``：新字段追加在字段末尾，
+    原有 20 个键的名称 / 顺序 / 数值完全不变；继承来的 ``to_dict()``（``asdict``）
+    会自动带上新字段，API / MCP / JSON 直接可见。
+    """
+
+    max_win_streak_days: int = 0                  # 最长连续上涨交易日数（日收益率 > 0）
+    max_loss_streak_days: int = 0                 # 最长连续下跌交易日数（日收益率 < 0）
+    best_trade_pct: Optional[float] = None        # 单笔平仓收益率最大值（百分数，正数 = 盈利）
+    worst_trade_pct: Optional[float] = None       # 单笔平仓收益率最小值（百分数，正数 = 盈利）
+    daily_trade_avg: float = 0.0                  # 日均交易次数 = len(trades) / max(1, 交易天数)
+
+
+def _updown_streaks(series: Sequence[float]) -> Tuple[int, int]:
+    """最长连续上涨 / 下跌交易日数（日收益率 > 0 / < 0；等于 0 或前值非正视为打断）。"""
+    up = down = 0
+    best_up = best_down = 0
+    for i in range(1, len(series)):
+        prev = series[i - 1]
+        change = series[i] / prev - 1.0 if prev > 0 else 0.0
+        if change > 0:
+            up += 1
+            down = 0
+        elif change < 0:
+            down += 1
+            up = 0
+        else:
+            up = down = 0
+        best_up = max(best_up, up)
+        best_down = max(best_down, down)
+    return best_up, best_down
+
+
+def _trade_attr(trade: Any, name: str, default: Any = None) -> Any:
+    """读 ``Trade`` 字段（兼容 dataclass 实例与 dict）。"""
+    if isinstance(trade, dict):
+        return trade.get(name, default)
+    return getattr(trade, name, default)
+
+
+def _closed_trade_returns(trades: Optional[Sequence[Trade]]) -> List[float]:
+    """按标的分组 **FIFO 配对**后的单笔平仓收益率（小数，正数 = 盈利）。
+
+    配对规则（与 ``portfolio.py`` 的记账口径一致）：
+
+    - 买入（``side=buy``）入队一个批次：单位成本 = （成交额 + 费用）/ 数量；
+      ``amount`` 缺失或非正时用 ``price × qty`` 兜底；
+    - 卖出（``side=sell``）**先进先出**冲减该标的的持仓批次：
+      卖出净额 = 成交额 - 费用，单位净额 = 卖出净额 / 数量；
+    - 单笔收益率 = ``(配对数量 × 单位净额 - 配对数量 × 单位成本) / 买入成本``；
+    - 只输出「买入 + 卖出」都存在的配对（一笔卖单部分冲减批次时，按已配对部分各记一笔）；
+      仍持有的买入、无买盘承接的卖出（做空 / 数据缺失）不产生记录；
+    - 数量非正、金额非正、方向非法、成本非正的记录一律跳过，绝不抛异常。
+    """
+    lots: Dict[str, List[List[float]]] = {}
+    out: List[float] = []
+    for trade in trades or []:
+        side = str(_trade_attr(trade, "side", "") or "").strip().lower()
+        if side not in ("buy", "sell"):
+            continue
+        qty = _finite(_trade_attr(trade, "qty", 0))
+        if qty <= 0:
+            continue
+        gross = _finite(_trade_attr(trade, "amount", 0.0))
+        if gross <= 0:
+            gross = _finite(_trade_attr(trade, "price", 0.0)) * qty
+        if gross <= 0:
+            continue
+        fee = max(_finite(_trade_attr(trade, "fee", 0.0)), 0.0)
+        code = str(_trade_attr(trade, "code", "") or "")
+        if side == "buy":
+            lots.setdefault(code, []).append([qty, (gross + fee) / qty])
+            continue
+        unit_net = (gross - fee) / qty
+        queue = lots.get(code)
+        remaining = qty
+        while remaining > 0 and queue:
+            lot = queue[0]
+            matched = min(remaining, lot[0])
+            cost = matched * lot[1]
+            if cost > 0:
+                ret = (matched * unit_net - cost) / cost
+                if _is_finite(ret):
+                    out.append(ret)
+            lot[0] -= matched
+            remaining -= matched
+            if lot[0] <= 0:
+                queue.pop(0)
+        if queue is not None and not queue:
+            lots.pop(code, None)
+    return out
+
+
+def _apply_extra_metrics(metrics: ExtendedMetrics, values: Sequence[float],
+                         trades: Optional[Sequence[Trade]], trading_days: int) -> ExtendedMetrics:
+    """写入 4 项新增指标（连续涨跌天数 / 单笔收益极值 / 日均交易次数）。
+
+    任何退化输入都只给 0 / ``None``，绝不抛异常。
+    """
+    win_streak, loss_streak = _updown_streaks(values)
+    returns = _closed_trade_returns(trades)
+    metrics.max_win_streak_days = win_streak
+    metrics.max_loss_streak_days = loss_streak
+    metrics.best_trade_pct = round(max(returns) * 100.0, 2) if returns else None
+    metrics.worst_trade_pct = round(min(returns) * 100.0, 2) if returns else None
+    trade_count = len(list(trades or []))
+    metrics.daily_trade_avg = round(trade_count / float(max(1, int(trading_days))), 2)
+    return metrics
+
+
 # --------------------------------------------------------------------------- 主函数
 def compute_metrics(
     dates: Sequence[str],
@@ -151,8 +271,12 @@ def compute_metrics(
     turnover_value: float = 0.0,
     risk_free_rate: float = 0.0,
     warnings: Optional[List[str]] = None,
-) -> BacktestMetrics:
+) -> ExtendedMetrics:
     """计算全部绩效指标（口径见模块 docstring）。
+
+    返回 :class:`ExtendedMetrics`（``BacktestMetrics`` 的子类）：原有 20 个键的数值不变，
+    额外携带 ``max_win_streak_days`` / ``max_loss_streak_days`` / ``best_trade_pct`` /
+    ``worst_trade_pct`` / ``daily_trade_avg`` 等新增键（退化输入下为 0 / ``None``）。
 
     ``warnings``：可选列表，数据不足 / 口径降级等信息会追加进去（由调用方展示）。
     """
@@ -162,7 +286,7 @@ def compute_metrics(
     trades = list(trades or [])
     rf = _finite(risk_free_rate)
 
-    metrics = BacktestMetrics(
+    metrics = ExtendedMetrics(
         start=dates[0] if dates else "",
         end=dates[-1] if dates else "",
         total_fee=round(_finite(total_fee), 2),
@@ -170,7 +294,7 @@ def compute_metrics(
     n = len(values)
     if n < 2:
         log.append("权益序列不足 2 个点，无法计算收益类指标（已全部置 0）")
-        return metrics
+        return _apply_extra_metrics(metrics, values, trades, 0)
     if len(dates) != n:
         log.append("日期序列与权益序列长度不一致（%d vs %d），缺失日期以空串填充" % (len(dates), n))
 
@@ -246,7 +370,7 @@ def compute_metrics(
     elif bench:
         log.append("基准权益序列不足 2 个点，基准收益 / Alpha / Beta 按 0 处理")
 
-    return metrics
+    return _apply_extra_metrics(metrics, values, trades, metrics.trading_days)
 
 
 # --------------------------------------------------------------------------- 序列工具

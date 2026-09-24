@@ -18,6 +18,7 @@ dist/
 !desktop/build/
 !desktop/build/**
 desktop/build/output/
+desktop/build/__pycache__/
 
 # ---------------------------------------------------------------------------
 # 运行时数据：行情缓存 / 自有 CSV / 持仓与模拟盘账本（不随仓库同步）

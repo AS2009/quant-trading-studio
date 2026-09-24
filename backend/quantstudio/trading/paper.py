@@ -26,9 +26,10 @@ import os
 from dataclasses import fields as _dc_fields
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from ..core import costs
 from ..core.errors import OrderRejected, ValidationError
-from ..core.models import Account, Fill, Order, Position, Quote
-from .broker_base import BaseBroker, apply_slippage, compute_fee, log_warn, normalize_code
+from ..core.models import Account, FeeConfig, Fill, Order, Position, Quote
+from .broker_base import BaseBroker, compute_fee, log_warn, normalize_code
 
 _STATE_VERSION = 1
 
@@ -160,7 +161,10 @@ class PaperBroker(BaseBroker):
                 )
             fill_price = round(reference, 2)      # 限价可成交时按最新价成交（对用户更优）
         else:
-            fill_price = apply_slippage(reference, order.side, self.slippage_bps)
+            # 成交价与回测同一口径（core.costs）：比例滑点用模拟盘的 slippage_bps，tick 滑点沿用费率配置
+            fill_cfg = FeeConfig(**self.fee.to_dict())
+            fill_cfg.slippage_bps = float(self.slippage_bps or 0.0)
+            fill_price = costs.exec_price(order.side, reference, fill_cfg)
 
         if fill_price <= 0:
             raise OrderRejected("成交价非法（%.4f），已拒单" % fill_price)

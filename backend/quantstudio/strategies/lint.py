@@ -411,6 +411,10 @@ class _FakeContext:
     def cash(self) -> float:
         return self._cash
 
+    def fee_config(self) -> None:
+        """烟雾回测不管费用（费率未知）：策略按 ``_FEE_BUFFER`` 保守估算即可。"""
+        return None
+
     def total_assets(self) -> float:
         return self._cash + sum(float(p.market_value or 0.0) for p in self._positions.values())
 

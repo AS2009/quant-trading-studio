@@ -2,8 +2,11 @@
 
 本页给出**可以直接复制使用**的完整策略，全部通过 `python scripts/check_strategies.py`（含烟雾回测与无未来函数校验）。
 
-> 下面两段代码与仓库中的 `backend/quantstudio/strategies/local/*.py` 一致（若两者不一致，以仓库文件为准）。
+> 下面的代码与仓库中的 `backend/quantstudio/strategies/local/*.py` 一致（若两者不一致，以仓库文件为准）。
 > 复制到 `backend/quantstudio/strategies/local/<slug>.py` 后记得同步修改**文件名 / id / 类名**三处。
+>
+> 本页示例：**A** 通道突破+ATR 止损（单标的） · **B** 动量轮动 TopN（多标的月度调仓） ·
+> **C** 最小骨架 · **D** 多指标共振（MACD+ADX+布林，对应仓库里的 `st_macd_adx`）。
 
 ---
 
@@ -319,6 +322,38 @@ class MinDemoStrategy(BaseStrategy):
 ```
 
 > 该骨架**未**放在 `local/` 里（避免污染策略列表）；要用就直接复制为 `local/min_demo.py` 并跑 lint。
+
+---
+
+## 示例 D：多指标共振（MACD + ADX + 布林，真实可运行）
+
+完整文件在 **`backend/quantstudio/strategies/local/macd_adx.py`**（`st_macd_adx`，通过校验与真实回测）。
+它演示了复合指标助手 + 「前一根 vs 当根」的无未来函数写法：
+
+```python
+diff = self.macd(closes, 12, 26, 9)          # (DIF, DEA, HIST)
+adx = self.adx(highs, lows, closes, 14)      # (ADX, +DI, −DI)
+boll = self.boll(closes, 20, 2.0)            # (上轨, 中轨, 下轨)
+if diff is None or adx is None or boll is None:
+    continue                                  # 数据不足就跳过，绝不猜
+
+dif, dea, _hist = diff
+prev_diff = self.macd(closes[:-1], 12, 26, 9)          # 去掉当根再算一次 = 前一根的值
+prev_dif, prev_dea = (prev_diff[0], prev_diff[1]) if prev_diff else (None, None)
+
+golden = prev_dif is not None and prev_dif <= prev_dea and dif > dea   # DIF 上穿 DEA
+if golden and adx[0] >= 20:                                            # 用 ADX 过滤震荡市
+    orders.append(self.buy_order(ctx, code, bar.close, 0.95, "MACD 金叉 + ADX 过滤"))
+```
+
+要点：
+
+* **ADX 过滤**是这类组合的关键：单用 MACD 在震荡市会反复被假信号打脸；
+* 「前一根」用 `closes[:-1]` 再算一次，或用 `self.cross(...)`（见 `docs/strategy-api.md` §3.3）；
+* 离场用「死叉 **或** 跌破布林中轨」，两条腿都走同一套判空约定；
+* 该策略在同一区间（600519.SH，2024 起）比内置双均线回撤更小、夏普更高——**但仍可能亏钱**，
+  实盘前请自己扩展样本与参数稳健性测试。
+---
 
 ---
 

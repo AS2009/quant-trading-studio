@@ -22,6 +22,7 @@ import sys
 from datetime import date, datetime
 from typing import Any, Callable, Dict, List, Optional
 
+from ..core import costs
 from ..core.errors import BrokerUnavailable, OrderRejected, ValidationError  # noqa: F401
 from ..core.models import Account, FeeConfig, Fill, Order, OrderRequest, Position
 
@@ -87,27 +88,24 @@ def normalize_code(code) -> str:
 
 
 def compute_fee(amount: float, side: str, fee: Optional[FeeConfig] = None) -> float:
-    """A 股单边费用（元，四舍五入到分）。
+    """A 股单边费用（元）——**直接复用回测口径** :func:`quantstudio.core.costs.fee_total`。
 
-    ``amount`` 为成交额；买入无印花税。金额 <= 0 时不收费。
-    回测引擎如与模拟盘对账，请复用本函数以保证口径一致。
+    ``amount`` 为成交额；买入无印花税；含每笔固定流量费 ``flow_fee``；金额 <= 0 时不收费。
+    模拟盘与回测（`SimulatedBroker`）因此永远同一套公式，改费率只需改 ``FeeConfig``。
     """
-    cfg = fee if isinstance(fee, FeeConfig) else FeeConfig(**(fee or {}))
     value = _as_float(amount)
     if value <= 0:
         return 0.0
-    commission = max(value * cfg.commission_rate, cfg.commission_min)
-    transfer = value * cfg.transfer_fee_rate
-    stamp = value * cfg.stamp_duty_rate if str(side or "").lower() == "sell" else 0.0
-    return round(commission + transfer + stamp, 2)
+    return costs.fee_total(side, value, costs.normalize_fee(fee))
 
 
 def apply_slippage(price: float, side: str, slippage_bps: float) -> float:
-    """滑点后的成交价：买入 ``price*(1+bps/10000)``，卖出反向；四舍五入到分。"""
-    rate = _as_float(slippage_bps) / 10000.0
-    value = float(price)
-    value = value * (1.0 - rate) if str(side or "").lower() == "sell" else value * (1.0 + rate)
-    return round(max(value, 0.0), 2)
+    """按**跳数滑点为 0** 的比例滑点算成交价（= :func:`quantstudio.core.costs.exec_price` 的退化情形）。
+
+    需要 tick 滑点（``slippage_ticks``）时请直接调用 ``core.costs.exec_price(side, price, fee)``。
+    """
+    fee = FeeConfig(slippage_bps=_as_float(slippage_bps), slippage_ticks=0.0)
+    return costs.exec_price(side, price, fee)
 
 
 # --------------------------------------------------------------------------- 基类

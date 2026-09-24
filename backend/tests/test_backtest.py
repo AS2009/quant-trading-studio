@@ -705,5 +705,324 @@ class TestBrokerPriceRules(unittest.TestCase):
         self.assertTrue(any("涨停" in key for key in summary))
 
 
+# --------------------------------------------------------------------------- 8. 新增绩效指标
+
+# 既有 20 个指标键（回归锁：只允许追加，不允许重命名 / 删除）
+BASE_METRIC_KEYS = {
+    "alpha_pct", "annual_return_pct", "benchmark_return_pct", "beta", "calmar", "end",
+    "max_drawdown_end", "max_drawdown_pct", "max_drawdown_start", "profit_loss_ratio",
+    "sharpe", "sortino", "start", "total_fee", "total_return_pct", "trade_count",
+    "trading_days", "turnover_pct", "volatility_pct", "win_rate_pct",
+}
+
+# 新增指标键（5 个键，4 项指标）
+NEW_METRIC_KEYS = {
+    "max_win_streak_days", "max_loss_streak_days",
+    "best_trade_pct", "worst_trade_pct", "daily_trade_avg",
+}
+
+
+def make_trade(day: str, side: str, price: float, qty: int, amount: Optional[float] = None,
+               fee: float = 0.0, code: str = "600000.SH", pnl: Optional[float] = None):
+    """构造一条成交流水（``amount`` 缺省 = price × qty，与 portfolio.py 一致）。"""
+    from quantstudio.core.models import Trade
+    return Trade(date=day, code=code, name="测试股", side=side, price=price, qty=qty,
+                 amount=price * qty if amount is None else amount, fee=fee,
+                 pnl=pnl, ret_pct=None, reason="test")
+
+
+class RoundTripStrategy(ProbeStrategy):
+    """探针策略的变体：第 100 日买入 1000 股、第 300 日全部卖出（制造真实的平仓配对）。"""
+
+    def on_bar(self, ctx, bars):
+        orders = super().on_bar(ctx, bars)
+        code = self.symbols[0] if self.symbols else ""
+        if self.day_index == 300:
+            orders.append(OrderRequest(code=code, side="sell", qty=1000, price=None, reason="探针卖出"))
+        return orders
+
+
+class TestExtraMetrics(unittest.TestCase):
+    """新增 4 项（5 个键）：连续涨跌天数、单笔收益极值、日均交易次数、既有键回归锁。"""
+
+    # ---- 1. 最长连续上涨 / 下跌交易日
+    def test_max_win_and_loss_streak_by_day(self):
+        up3 = compute_metrics(["d%d" % i for i in range(5)], [100.0, 101.0, 102.0, 103.0, 102.0])
+        self.assertEqual(up3.max_win_streak_days, 3)
+        self.assertEqual(up3.max_loss_streak_days, 1)
+
+        # 震荡序列：上涨日共 5 天，但「最长连续」只有 3 天 —— 最长 ≠ 总数
+        zig = compute_metrics(["d%d" % i for i in range(8)],
+                              [100.0, 101.0, 100.0, 102.0, 103.0, 104.0, 100.0, 99.0])
+        self.assertEqual(zig.max_win_streak_days, 3)
+        self.assertEqual(zig.max_loss_streak_days, 2)
+
+        # 涨跌幅 = 0 视为打断：+1、0、+0.99、+0.98 → 最长连涨 2
+        flat = compute_metrics(["a", "b", "c", "d", "e"], [100.0, 101.0, 101.0, 102.0, 103.0])
+        self.assertEqual(flat.max_win_streak_days, 2)
+        self.assertEqual(flat.max_loss_streak_days, 0)
+
+        # 单点 / 空序列：没有日收益 → 0
+        self.assertEqual(compute_metrics(["a"], [100.0]).max_win_streak_days, 0)
+        self.assertEqual(compute_metrics([], []).max_loss_streak_days, 0)
+
+    # ---- 2. 单笔平仓收益率极值（FIFO 配对）
+    def test_best_and_worst_trade_pct_fifo(self):
+        # 手算：30 元买 100 股（3000 元）→ 35 元卖 100 股（3500 元）= +16.666…% → 16.67
+        one = compute_metrics(["d1", "d2", "d3", "d4"], [100.0, 101.0, 102.0, 103.0], trades=[
+            make_trade("d1", "buy", 30.0, 100),
+            make_trade("d2", "sell", 35.0, 100, pnl=500.0),
+        ])
+        self.assertAlmostEqual(one.best_trade_pct, 16.67, places=2)
+        self.assertAlmostEqual(one.worst_trade_pct, 16.67, places=2)
+
+        # 费用口径：买入成本 = 成交额 + 费用，卖出净额 = 成交额 - 费用
+        # (11000 - 6 - (10000 + 5)) / 10005 = 9.885% → 9.89
+        with_fee = compute_metrics(["d1", "d2", "d3"], [100.0, 101.0, 102.0], trades=[
+            make_trade("d1", "buy", 10.0, 1000, fee=5.0),
+            make_trade("d2", "sell", 11.0, 1000, fee=6.0, pnl=989.0),
+        ])
+        self.assertAlmostEqual(with_fee.best_trade_pct, 9.89, places=2)
+
+        # 多标的按 code 分组 + 先进先出：A 先买的 500 股先出，B 整笔出；C 只有买入不配对
+        multi = compute_metrics(["d1", "d2", "d3", "d4"], [100.0] * 4, trades=[
+            make_trade("d1", "buy", 10.0, 1000, code="A"),
+            make_trade("d2", "buy", 8.0, 1000, code="B"),
+            make_trade("d3", "sell", 12.0, 500, code="A", pnl=1000.0),
+            make_trade("d4", "sell", 6.0, 1000, code="B", pnl=-2000.0),
+            make_trade("d4", "buy", 20.0, 100, code="C", fee=5.0),
+        ])
+        self.assertAlmostEqual(multi.best_trade_pct, 20.0, places=2)      # (6000 - 5000) / 5000
+        self.assertAlmostEqual(multi.worst_trade_pct, -25.0, places=2)    # (6000 - 8000) / 8000
+
+        # 没有完整配对 → None（不抛异常）
+        only_buy = compute_metrics(["d1", "d2"], [100.0, 101.0],
+                                   trades=[make_trade("d1", "buy", 10.0, 100)])
+        self.assertIsNone(only_buy.best_trade_pct)
+        self.assertIsNone(only_buy.worst_trade_pct)
+        only_sell = compute_metrics(["d1", "d2"], [100.0, 101.0],
+                                    trades=[make_trade("d1", "sell", 10.0, 100, pnl=1.0)])
+        self.assertIsNone(only_sell.best_trade_pct)
+        self.assertIsNone(only_sell.worst_trade_pct)
+        no_trades = compute_metrics(["d1", "d2"], [100.0, 101.0], trades=[])
+        self.assertIsNone(no_trades.best_trade_pct)
+        self.assertIsNone(no_trades.worst_trade_pct)
+
+    # ---- 3. 日均交易次数
+    def test_daily_trade_avg(self):
+        trades = [make_trade("d%d" % i, "buy", 10.0, 100, code="A") for i in range(4)]
+        four = compute_metrics(["d0", "d1", "d2", "d3", "d4", "d5"], [100.0] * 6, trades=trades)
+        self.assertEqual(four.trading_days, 5)               # 第 0 个点是区间基准点
+        self.assertAlmostEqual(four.daily_trade_avg, 0.8, places=6)      # 4 / 5
+
+        self.assertAlmostEqual(compute_metrics(["a", "b"], [100.0, 101.0]).daily_trade_avg,
+                               0.0, places=6)
+
+        many = compute_metrics(["a", "b", "c", "d"], [100.0] * 4,
+                               trades=[make_trade("d", "buy", 1.0, 100) for _ in range(8)])
+        self.assertAlmostEqual(many.daily_trade_avg, 2.67, places=6)     # 8 / 3，保留 2 位
+
+        # 权益为空时 trading_days = 0，按 max(1, 0) = 1 兜底（不抛异常）
+        empty = compute_metrics([], [], trades=[make_trade("d", "buy", 1.0, 100)])
+        self.assertAlmostEqual(empty.daily_trade_avg, 1.0, places=6)
+
+    # ---- 4. 退化输入绝不抛异常
+    def test_degenerate_inputs_never_raise(self):
+        cases = [
+            ("空序列", {"dates": [], "equity": []}, 0, 0),
+            ("单点", {"dates": ["2024-01-02"], "equity": [100.0]}, 0, 0),
+            ("无 trades", {"dates": ["a", "b"], "equity": [100.0, 101.0], "trades": []}, 1, 0),
+            ("权益含 0", {"dates": ["a", "b", "c"], "equity": [100.0, 0.0, 50.0]}, 0, 1),
+            ("权益全负", {"dates": ["a", "b", "c"], "equity": [-1.0, -2.0, -3.0]}, 0, 0),
+            ("平盘", {"dates": ["a", "b", "c"], "equity": [100.0, 100.0, 100.0]}, 0, 0),
+            ("NaN / Inf", {"dates": ["a", "b"], "equity": [float("nan"), float("inf")]}, 0, 0),
+        ]
+        for label, kwargs, win, loss in cases:
+            with self.subTest(label):
+                metrics = compute_metrics(**kwargs)
+                self.assertEqual(metrics.max_win_streak_days, win, label)
+                self.assertEqual(metrics.max_loss_streak_days, loss, label)
+                self.assertIsNone(metrics.best_trade_pct, label)
+                self.assertIsNone(metrics.worst_trade_pct, label)
+                self.assertTrue(math.isfinite(metrics.daily_trade_avg), label)
+                for key, value in metrics.to_dict().items():
+                    if isinstance(value, float):
+                        self.assertFalse(math.isnan(value), "%s: %s" % (label, key))
+
+        # 畸形成交流水：方向非法 / 数量 0 / 金额非正 / 卖无买盘 / 缺字段 → 全忽略，不抛异常
+        weird = [
+            {"date": "d1", "code": "A", "side": "hold", "price": 10.0, "qty": 100},
+            {"date": "d1", "code": "A", "side": "buy", "price": 0.0, "qty": 0, "amount": 0.0},
+            {"date": "d2", "code": "A", "side": "buy", "price": -5.0, "qty": 100, "amount": -500.0},
+            {"date": "d3", "code": "A", "side": "sell", "price": 10.0, "qty": 100, "amount": 1000.0},
+            {"date": "d4", "code": "A", "side": "buy", "price": 10.0, "qty": 100, "amount": 1000.0},
+            {"date": "d5", "code": "A", "side": "sell", "price": float("nan"), "qty": 100, "amount": 0.0},
+        ]
+        malformed = compute_metrics(["d1", "d2", "d3", "d4", "d5", "d6"], [100.0] * 6,
+                                    trades=weird, warnings=[])
+        self.assertIsNone(malformed.best_trade_pct)          # 唯一带金额的买入下面没有成交
+        self.assertIsNone(malformed.worst_trade_pct)
+        self.assertEqual(malformed.max_win_streak_days, 0)
+
+    # ---- 5. 回归锁：真实回测跑一遍，既有 20 个键一个都不少
+    def test_regression_lock_and_real_backtest(self):
+        request = BacktestRequest(strategy_id="probe_test", symbols=["600519.SH"],
+                                  start="2020-01-01", end="2030-01-01", initial_cash=1_000_000.0,
+                                  benchmark="000300.SH")
+        result = BacktestEngine(FakeProvider()).run(
+            request, RoundTripStrategy(symbols=["600519.SH"],
+                                       params={"qty": 1000, "buy_on_day": 100}))
+        payload = result.to_dict()["metrics"]
+        keys = set(payload)
+        self.assertTrue(BASE_METRIC_KEYS.issubset(keys),
+                        "既有指标键缺失：%s" % sorted(BASE_METRIC_KEYS - keys))
+        self.assertTrue(NEW_METRIC_KEYS.issubset(keys),
+                        "新增指标键缺失：%s" % sorted(NEW_METRIC_KEYS - keys))
+        print("\n[metrics] 旧键 %d 个 + 新键 %d 个 = %d 个"
+              % (len(BASE_METRIC_KEYS), len(NEW_METRIC_KEYS), len(keys)))
+        print("[metrics] 真实回测：max_win_streak_days=%s max_loss_streak_days=%s "
+              "best_trade_pct=%s worst_trade_pct=%s daily_trade_avg=%s"
+              % (payload["max_win_streak_days"], payload["max_loss_streak_days"],
+                 payload["best_trade_pct"], payload["worst_trade_pct"], payload["daily_trade_avg"]))
+
+        # 连续涨跌天数与真实逐日权益序列互相印证（按日收益率独立重算一遍）
+        equity = [item["equity"] for item in result.equity]
+        up = down = best_up = best_down = 0
+        for i in range(1, len(equity)):
+            change = equity[i] / equity[i - 1] - 1.0 if equity[i - 1] > 0 else 0.0
+            if change > 0:
+                up, down = up + 1, 0
+            elif change < 0:
+                down, up = down + 1, 0
+            else:
+                up = down = 0
+            best_up, best_down = max(best_up, up), max(best_down, down)
+        # 只要求「既有键一个不少 + 新键都在」；不锁死总键数（其他模块可能继续追加指标）
+        self.assertGreaterEqual(len(keys), len(BASE_METRIC_KEYS) + len(NEW_METRIC_KEYS),
+                                "指标键数量至少应为 旧 20 + 新 5")
+        self.assertEqual(payload["max_win_streak_days"], best_up)
+        self.assertEqual(payload["max_loss_streak_days"], best_down)
+        self.assertEqual(payload["trading_days"], len(equity) - 1)
+
+        # 一笔完整的「买入 → 卖出」平仓：极值应与手算一致
+        buys = [t for t in result.trades if t.side == "buy"]
+        sells = [t for t in result.trades if t.side == "sell"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(len(sells), 1)
+        cost = buys[0].amount + buys[0].fee
+        expected = round((sells[0].amount - sells[0].fee - cost) / cost * 100.0, 2)
+        self.assertAlmostEqual(payload["best_trade_pct"], expected, places=2)
+        self.assertAlmostEqual(payload["worst_trade_pct"], expected, places=2)
+        self.assertAlmostEqual(payload["daily_trade_avg"],
+                               round(len(result.trades) / payload["trading_days"], 2), places=6)
+
+        # 新增键不影响对外序列化（前端 / MCP / API 契约）
+        import json
+        json.dumps(result.to_dict(), ensure_ascii=False, allow_nan=False)
+        self.assertGreater(result.metrics.trading_days, 100)
+
+
+# --------------------------------------------------------------------------- 8. 买入量与费率接线
+
+
+class FullPositionStrategy(ProbeStrategy):
+    """第 100 日用 ``buy_order(pct=1.0)`` 满仓买入一次，并记录上下文暴露的费率信息。"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.seen_fee = None
+        self.seen_lot = None
+        self.asked_qty = 0
+
+    def on_bar(self, ctx, bars):
+        self.day_index += 1                       # 与父类同口径的天数计数
+        if self.day_index != 100:
+            return []
+        code = self.symbols[0] if self.symbols else ""
+        self.seen_fee = ctx.fee_config()
+        self.seen_lot = getattr(ctx, "lot_size", None)
+        order = self.buy_order(ctx, code, bars[code].close, 1.0, reason="满仓")
+        self.asked_qty = int(order.qty) if order is not None else 0
+        return [order] if order is not None else []
+
+
+class TestBuySizingWiring(unittest.TestCase):
+    """引擎把本轮费率交给上下文：策略满仓量与撮合同口径，且不会因费用被砍单。"""
+
+    def test_full_position_matches_broker_with_heavy_fees(self):
+        fee = FeeConfig(flow_fee=7.0, slippage_ticks=2.0, tick_size=0.01)
+        request = BacktestRequest(strategy_id="probe_test", symbols=["600519.SH"],
+                                  start="2020-01-01", end="2030-01-01", initial_cash=200_000.0,
+                                  benchmark="000300.SH", fee=fee)
+        strategy = FullPositionStrategy(symbols=["600519.SH"])
+        result = BacktestEngine(FakeProvider()).run(request, strategy)
+
+        self.assertIsInstance(strategy.seen_fee, FeeConfig)
+        self.assertEqual(strategy.seen_fee.flow_fee, 7.0)
+        self.assertEqual(strategy.seen_fee.slippage_ticks, 2.0)
+        self.assertEqual(strategy.seen_lot, 100)
+
+        buys = [t for t in result.trades if t.side == "buy"]
+        self.assertEqual(len(buys), 1)
+        self.assertGreater(strategy.asked_qty, 0)
+        self.assertEqual(strategy.asked_qty, buys[0].qty, "策略给出的量不该被撮合缩量")
+        for line in result.warnings:
+            self.assertNotIn("未成交", line)
+            self.assertNotIn("可用资金不足", line)
+
+    def test_context_fee_defaults_when_not_passed(self):
+        """不传 fee 时上下文给默认费率（策略照样能精确反解）。"""
+        request = BacktestRequest(strategy_id="probe_test", symbols=["600519.SH"],
+                                  start="2020-01-01", end="2030-01-01",
+                                  benchmark="000300.SH")
+        strategy = FullPositionStrategy(symbols=["600519.SH"])
+        BacktestEngine(FakeProvider()).run(request, strategy)
+        self.assertIsInstance(strategy.seen_fee, FeeConfig)
+        self.assertEqual(strategy.seen_fee.slippage_bps, FeeConfig().slippage_bps)
+        self.assertGreater(strategy.asked_qty, 0)
+
+
+class RoundTripLotStrategy(ProbeStrategy):
+    """第 100 日满仓买入、第 120 日清仓（验证账户 ``lot_size`` ≠ 策略 ``lot_size`` 时的买卖口径）。"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.asked_qty = 0
+        self.sold_qty = 0
+
+    def on_bar(self, ctx, bars):
+        self.day_index += 1
+        code = self.symbols[0] if self.symbols else ""
+        if self.day_index == 100:
+            order = self.buy_order(ctx, code, bars[code].close, 1.0, reason="满仓")
+            self.asked_qty = int(order.qty) if order is not None else 0
+            return [order] if order is not None else []
+        if self.day_index == 120:
+            order = self.sell_order(ctx, code, reason="清仓")
+            self.sold_qty = int(order.qty) if order is not None else 0
+            return [order] if order is not None else []
+        return []
+
+
+class TestLotSizeWiring(unittest.TestCase):
+    """账户一手 10 股（HTTP/MCP 的 ``lot_size`` 参数）时，买卖两侧手数必须同源，不能留下卖不掉的零股。"""
+
+    def test_round_trip_when_lot_size_below_strategy_default(self):
+        request = BacktestRequest(strategy_id="probe_test", symbols=["600519.SH"],
+                                  start="2020-01-01", end="2030-01-01", initial_cash=200_000.0,
+                                  benchmark="000300.SH", fee=FeeConfig(lot_size=10))
+        strategy = RoundTripLotStrategy(symbols=["600519.SH"])
+        result = BacktestEngine(FakeProvider()).run(request, strategy)
+
+        buys = [t for t in result.trades if t.side == "buy"]
+        sells = [t for t in result.trades if t.side == "sell"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(strategy.asked_qty % 10, 0, "买入按账户的 10 股一手")
+        self.assertEqual(len(sells), 1, "10 股一手的账户里持仓必须能卖掉（口径不一致会留下零股）")
+        self.assertEqual(strategy.sold_qty, buys[0].qty)
+        self.assertEqual(sells[0].qty, buys[0].qty)
+        self.assertEqual(result.positions, [], "期末不该留下卖不掉的零股")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

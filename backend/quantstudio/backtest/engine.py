@@ -28,12 +28,14 @@ import bisect
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..config import Settings, get_settings
+from ..core import costs
 from ..core.calendar import TradingCalendar
 from ..core.errors import InsufficientData, ValidationError
 from ..core.models import (
     BacktestRequest,
     BacktestResult,
     Bar,
+    FeeConfig,
     OrderRequest,
     Position,
     StrategySpec,
@@ -126,9 +128,11 @@ class BacktestContext:
     停牌日（当日无真实 bar）沿用上一根 bar 的收盘价（前向填充），因此不会出现空窗。
     """
 
-    def __init__(self, account: SimAccount, symbols: Sequence[str]):
+    def __init__(self, account: SimAccount, symbols: Sequence[str], fee: Optional[FeeConfig] = None):
         self._account = account
+        self._fee = fee if isinstance(fee, FeeConfig) else FeeConfig()
         self.symbols: List[str] = list(symbols)
+        self.lot_size = int(getattr(account, "lot_size", 100) or 100)
         self.today = ""
         self.logs: List[str] = []
         self._series: Dict[str, _Series] = {}
@@ -195,6 +199,10 @@ class BacktestContext:
 
     def total_assets(self) -> float:
         return self._account.equity()
+
+    def fee_config(self) -> FeeConfig:
+        """本轮回测使用的费率配置（策略据此精确反解可买数量，无需自己猜费用）。"""
+        return self._fee
 
     def log(self, message: str) -> None:
         """回测过程中的信息（会汇总到结果 warnings）。"""
@@ -291,16 +299,18 @@ class BacktestEngine:
         first_date, last_date = range_dates[0], range_dates[-1]
         base_date = self._base_date(first_date)
 
-        # ---- 账户 / 撮合 / 上下文
+        # ---- 账户 / 撮合 / 上下文（费率先归一化一次，account/broker/ctx 共用同一对象）
+        fee = costs.normalize_fee(request.fee)
+        request.fee = fee
         initial_cash = float(request.initial_cash or self.settings.initial_cash)
-        lot_size = int(getattr(request.fee, "lot_size", 100) or 100)
+        lot_size = int(fee.lot_size or 100)
         account = SimAccount(initial_cash, lot_size=lot_size)
-        broker = self.broker or SimulatedBroker(request.fee, self.calendar, fill_mode=self.fill_mode)
-        broker.fee = request.fee
+        broker = self.broker or SimulatedBroker(fee, self.calendar, fill_mode=self.fill_mode)
+        broker.fee = fee
         broker.lot_size = lot_size
         broker.reset()
 
-        ctx = BacktestContext(account, symbols)
+        ctx = BacktestContext(account, symbols, fee=fee)
         ctx.prepare({**series, **(dict([(request.benchmark, bench_bars)]) if bench_bars else {})}, first_date)
 
         strategy.on_start(ctx)
