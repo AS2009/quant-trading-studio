@@ -1,0 +1,103 @@
+name: build-macos
+
+# 触发：
+#  - 手动 workflow_dispatch：随时出 macOS 包（只上传 artifacts，不动 Release）
+#  - push tag `v*`：构建 .app/.zip/.dmg，并把 zip/dmg **附加**到同名 Release
+#    （用 gh release upload，不覆盖 Windows 任务写的 Release 正文）
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write          # tag 时要把资产附加到 Release
+
+concurrency:
+  group: build-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-macos:
+    name: macOS 通用二进制（universal2）
+    # macos-14 = Apple Silicon runner；Xcode 自带的 Python 3.9 是 universal2，
+    # 因此可以在 arm64 机器上打出同时支持 Intel 的 universal2 包。
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 环境信息（Xcode / Python / Tk）
+        run: |
+          sw_vers
+          xcode-select -p
+          /usr/bin/python3 -V
+          /usr/bin/python3 -c "import tkinter, sys; print('tkinter OK, Tk', tkinter.TkVersion); print(sys.executable)"
+          lipo -info /usr/bin/python3 2>/dev/null || true
+
+      - name: 准备打包依赖（venv + PyInstaller）
+        run: |
+          /usr/bin/python3 -m venv .venv-macos
+          .venv-macos/bin/python -m pip install --upgrade pip
+          .venv-macos/bin/python -m pip install -r requirements-desktop.txt
+          .venv-macos/bin/python -m PyInstaller --version
+
+      - name: 从源码读出桌面版本号
+        id: version
+        run: |
+          VERSION="$(.venv-macos/bin/python -c "import re,pathlib; print(re.search(r'^__version__\s*=\s*\"([^\"]+)\"', pathlib.Path('desktop/quantstudio_desktop/__init__.py').read_text(encoding='utf-8'), re.M).group(1))")"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "桌面版本号：${VERSION}"
+
+      - name: 构建 .app + zip + dmg（含图标、签名、自检）
+        env:
+          PYTHON: ${{ github.workspace }}/.venv-macos/bin/python
+        run: |
+          bash desktop/build/build_macos.sh --clean
+
+      - name: 校验 Info.plist / 架构
+        run: |
+          PY=".venv-macos/bin/python"
+          "$PY" desktop/build/check_bundle.py \
+            desktop/build/output-macos/dist/QuantTradingStudio.app \
+            --expect-version "${{ steps.version.outputs.version }}"
+
+      - name: 校验 dmg 可挂载且内含 .app
+        run: |
+          DMG="desktop/build/output-macos/pkg/QuantTradingStudio-macos-universal2.dmg"
+          MOUNT="$(hdiutil attach -nobrowse -readonly "$DMG" | tail -1 | awk '{print $3}')"
+          echo "挂载点：${MOUNT}"
+          ls -la "${MOUNT}"
+          test -x "${MOUNT}/QuantTradingStudio.app/Contents/MacOS/QuantTradingStudio"
+          hdiutil detach "${MOUNT}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QuantTradingStudio-macos-universal2
+          if-no-files-found: error
+          path: |
+            desktop/build/output-macos/pkg/QuantTradingStudio-macos-universal2.zip
+            desktop/build/output-macos/pkg/QuantTradingStudio-macos-universal2.dmg
+            desktop/build/output-macos/selftest/*.txt
+
+      # tag v* → 等 Windows 任务把 Release 建出来，再把 macOS 资产附加上去
+      # （不改 Release 名称/正文，避免覆盖 build-desktop 里的发布说明）
+      - name: 附加 zip/dmg 到 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for i in $(seq 1 20); do
+            if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+              gh release upload "$GITHUB_REF_NAME" \
+                desktop/build/output-macos/pkg/QuantTradingStudio-macos-universal2.zip \
+                desktop/build/output-macos/pkg/QuantTradingStudio-macos-universal2.dmg \
+                --clobber
+              echo "已附加 macOS 资产到 $GITHUB_REF_NAME"
+              exit 0
+            fi
+            echo "Release $GITHUB_REF_NAME 尚未创建，等 30 秒（第 $i 次）…"
+            sleep 30
+          done
+          echo "[失败] 等不到 Release $GITHUB_REF_NAME（Windows 任务可能失败了）；macOS 资产仍在 artifacts 里"
+          exit 1

@@ -19,7 +19,7 @@
 
 ### 方式 A：用编译好的程序（推荐给使用者）
 
-1. 打开仓库的 **Actions → build-desktop**（或 **Releases** 页面），下载 `QuantTradingStudio-windows-x64` 制品包；
+1. 打开仓库的 **Actions → build-desktop**（或 **Releases** 页面），下载 `QuantTradingStudio-windows-x64.zip`；
 2. 解压到任意目录（例如 `D:\QuantTradingStudio`），双击 **`QuantTradingStudio.exe`**；
 3. 首次启动会创建数据目录 `%LOCALAPPDATA%\QuantTradingStudio\data`，无需管理员权限。
 
@@ -46,7 +46,31 @@ powershell -ExecutionPolicy Bypass -File desktop\build\build_windows.ps1
 powershell -ExecutionPolicy Bypass -File desktop\build\build_windows.ps1 -OneFile -SkipTests
 ```
 
-macOS / Linux 上等价脚本是 `desktop/build/build_unix.sh`（用于本地验证；真正交付的是 Windows 产物）。
+**macOS 版**：`./desktop/build/build_macos.sh` 一键产出 `QuantTradingStudio.app` + `.zip` + `.dmg`（默认 universal2，
+Intel 与 Apple Silicon 通用）——见 [方式 D](#方式-d本机打包-macos-版)。仅用于本地验证 spec 的旧脚本是
+`desktop/build/build_unix.sh`（不生成 .app / 不签名 / 不打 dmg）。
+
+### 方式 D：本机打包 macOS 版
+
+```bash
+# 需要 Xcode 命令行工具（iconutil / codesign）与自带 tkinter 的 Python
+PYTHON=/usr/bin/python3 ./desktop/build/build_macos.sh            # universal2 + 自检 + zip + dmg
+bash desktop/build/build_macos.sh --arch=arm64                    # 只打当前架构
+bash desktop/build/build_macos.sh --clean --rebuild-icon
+```
+
+产物在 `desktop/build/output-macos/`：`dist/QuantTradingStudio.app`（约 20 MB）、
+`pkg/QuantTradingStudio-macos-universal2.zip`（约 7.4 MB）、`...dmg`（约 8.0 MB，含「应用程序」快捷方式）。
+
+两个 macOS 特有的注意点：
+
+* **Tcl/Tk 来自系统**：macOS 11+ 把 Tcl/Tk 放在 dyld 共享缓存里（`/System/Library/Frameworks/Tk.framework`
+  只有 stub、没有磁盘二进制），所以 `.app` 不自带 Tk 8.5，运行时用系统框架 —— 这也是 macOS 产物只有
+  Windows 一半体积的原因；
+* **ad-hoc 签名、未公证**：脚本会做 ad-hoc 签名（Apple Silicon 上不加签名无法启动），但没有开发者签名与
+  公证证书，别人首次打开需**右键 →「打开」**（只需一次），或
+  `xattr -dr com.apple.quarantine /Applications/QuantTradingStudio.app` 去掉隔离标记。
+  要彻底免打扰就得买 Apple Developer 账号并做签名 + 公证。
 
 ---
 

@@ -10,7 +10,8 @@
 
     Windows : desktop/build/output/dist/QuantTradingStudio/QuantTradingStudio.exe
     Linux   : desktop/build/output/dist/QuantTradingStudio/QuantTradingStudio
-    macOS   : desktop/build/output/dist/QuantTradingStudio/QuantTradingStudio
+    macOS   : desktop/build/output/dist/QuantTradingStudio.app（BUNDLE 包：Info.plist + icon.icns，
+              默认按 universal2 构建 → Intel 与 Apple Silicon 通用；旁边仍有同名的 COLLECT 目录）
 
 要点
 ----
@@ -27,9 +28,14 @@
   ``%TEMP%/quantstudio_selftest.txt``（见 ``desktop/quantstudio_desktop/selftest.py``），CI 靠它取输出；
 * ``icon`` 与 Windows 版本资源都做了**降级**：图标文件缺失时不传 ``icon=``（CI 不会因为没有图标失败），
   版本资源只在 ``sys.platform == "win32"`` 时传（非 Windows 上 PyInstaller 不支持该参数）。
+* **macOS**：``COLLECT`` 之后再用 ``BUNDLE`` 包成 ``.app``——``Info.plist`` 里的版本号直接
+  从 ``desktop/quantstudio_desktop/__init__.py`` 的 ``__version__`` 读，**不在这里重复写**；
+  图标用 ``icon.icns``（由 ``desktop/build/make_icns.py`` 生成）；架构由环境变量
+  ``QUANTSTUDIO_MACOS_ARCH``（默认 ``universal2``）控制，签名留给 ``build_macos.sh`` 做 ad-hoc。
 """
 
 import os
+import re
 import sys
 
 # --------------------------------------------------------------------------- 路径
@@ -39,7 +45,8 @@ _REPO_ROOT = os.path.abspath(os.path.join(_SPEC_DIR, os.pardir, os.pardir))   # 
 _BACKEND_DIR = os.path.join(_REPO_ROOT, "backend")
 _DESKTOP_DIR = os.path.join(_REPO_ROOT, "desktop")
 _APP_MAIN = os.path.join(_DESKTOP_DIR, "quantstudio_desktop", "__main__.py")
-_ICON_FILE = os.path.join(_SPEC_DIR, "icon.ico")
+_ICON_ICO = os.path.join(_SPEC_DIR, "icon.ico")
+_ICON_ICNS = os.path.join(_SPEC_DIR, "icon.icns")
 _VERSION_FILE = os.path.join(_SPEC_DIR, "version_info.txt")
 _LOCAL_STRATEGY_DIR = os.path.join(_BACKEND_DIR, "quantstudio", "strategies", "local")
 
@@ -49,6 +56,35 @@ for _path in (_APP_MAIN, _BACKEND_DIR, _DESKTOP_DIR):
             "[quantstudio.spec] 找不到 %s\n"
             "  请在仓库根目录执行：python -m PyInstaller desktop/build/quantstudio.spec ..." % _path)
 
+
+
+# --------------------------------------------------------------------------- 平台开关（macOS）
+# macOS 产物是 .app；其余平台保持原样（Windows 的 .exe 与 Linux 的裸可执行文件）。
+_IS_MAC = sys.platform == "darwin"
+
+#: macOS 架构：universal2（默认，Intel + Apple Silicon 通用）/ arm64 / x86_64。
+#: 需要"只有一个架构"时可 QUANTSTUDIO_MACOS_ARCH=arm64 覆盖（体积更小）。
+_MAC_ARCH = os.environ.get("QUANTSTUDIO_MACOS_ARCH", "universal2").strip() or "universal2"
+
+#: .app 的 Info.plist 里要写的版本号与反向域名标识
+_BUNDLE_ID = "com.quantstudio.desktop"
+
+
+def _read_app_version():
+    """从 ``desktop/quantstudio_desktop/__init__.py`` 读 ``__version__``（单一事实来源）。"""
+    init_file = os.path.join(_DESKTOP_DIR, "quantstudio_desktop", "__init__.py")
+    try:
+        with open(init_file, encoding="utf-8") as handle:
+            match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', handle.read(), re.M)
+    except OSError:
+        return "0.0.0"
+    if not match:
+        print("[quantstudio.spec] 未在 %s 里找到 __version__，Info.plist 用 0.0.0" % init_file)
+        return "0.0.0"
+    return match.group(1)
+
+
+_APP_VERSION = _read_app_version()
 
 # --------------------------------------------------------------------------- 隐式导入
 # 核心包（quantstudio）：按名字动态导入 / 工厂构造，静态分析看不到
@@ -184,6 +220,7 @@ if os.path.isfile(os.path.join(_BACKEND_DIR, "data", "README.md")):
 
 # --------------------------------------------------------------------------- 可选资源
 _EXE_KWARGS = {}
+_ICON_FILE = _ICON_ICNS if _IS_MAC else _ICON_ICO
 if os.path.exists(_ICON_FILE):
     _EXE_KWARGS["icon"] = _ICON_FILE          # 缺失时降级为 PyInstaller 默认图标，不让 CI 失败
 else:
@@ -257,7 +294,7 @@ exe = EXE(
     console=False,                    # GUI 程序：不弹控制台窗口
     disable_windowed_traceback=True,  # CI 里不能弹模态错误框（会卡住流水线），异常走退出码
     argv_emulation=False,             # macOS：不劫持命令行参数（--selftest 要能收到）
-    target_arch=None,
+    target_arch=(_MAC_ARCH if _IS_MAC else None),   # macOS 默认 universal2（Intel + Apple Silicon 通用）
     codesign_identity=None,
     entitlements_file=None,
     **_EXE_KWARGS
@@ -271,3 +308,37 @@ coll = COLLECT(
     upx=False,
     name="QuantTradingStudio",        # 产物目录：dist/QuantTradingStudio/
 )
+
+if _IS_MAC:
+    # .app 包：Info.plist 的版本号与 __version__ 同源；图标用 icon.icns；签名留给构建脚本做 ad-hoc。
+    # 注意：--selftest / --mcp 这些命令行参数走 Contents/MacOS/QuantTradingStudio，
+    # argv_emulation=False 保证能收到。
+    _BUNDLE_KWARGS = {}
+    if os.path.exists(_ICON_ICNS):
+        _BUNDLE_KWARGS["icon"] = _ICON_ICNS      # 缺失时不传：让 PyInstaller 用默认图标而不是报错
+    else:
+        print("[quantstudio.spec] 未找到 %s（可执行 python desktop/build/make_icns.py 生成），"
+              "使用 PyInstaller 默认图标" % _ICON_ICNS)
+
+    app = BUNDLE(
+        coll,
+        name="QuantTradingStudio.app",
+        bundle_identifier=_BUNDLE_ID,
+        version=_APP_VERSION,
+        info_plist={
+            "CFBundleName": "QuantTrading Studio",
+            "CFBundleDisplayName": "QuantTrading Studio",
+            "CFBundleShortVersionString": _APP_VERSION,
+            "CFBundleVersion": _APP_VERSION,
+            "CFBundleDevelopmentRegion": "zh_CN",
+            "NSHumanReadableCopyright":
+                "Copyright (C) 2025 QuantTrading Studio. All rights reserved.",
+            "NSHighResolutionCapable": True,          # Retina 清晰渲染
+            "LSMinimumSystemVersion": "11.0",
+            "LSApplicationCategoryType": "public.app-category.finance",
+        },
+        **_BUNDLE_KWARGS
+    )
+    _DIST_DIR = globals().get("DISTPATH") or os.path.join(_REPO_ROOT, "dist")
+    print("[quantstudio.spec] macOS .app 版本 %s（arch=%s）→ %s"
+          % (_APP_VERSION, _MAC_ARCH, os.path.join(_DIST_DIR, "QuantTradingStudio.app")))

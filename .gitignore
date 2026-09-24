@@ -18,6 +18,8 @@ dist/
 !desktop/build/
 !desktop/build/**
 desktop/build/output/
+desktop/build/output-macos/
+desktop/build/icon.iconset/
 desktop/build/__pycache__/
 
 # ---------------------------------------------------------------------------

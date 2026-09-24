@@ -62,6 +62,38 @@ PYTHON=/usr/bin/python3 ./desktop/build/build_unix.sh            # 系统 python
 ./desktop/build/build_unix.sh --onefile --skip-tests --skip-deps
 ```
 
+### macOS（正式产物：`.app` + zip + dmg）
+
+```bash
+# 一键：图标 → 源码自检 → 构建 .app（universal2）→ ad-hoc 签名 → 产物自检 → zip + dmg
+PYTHON=/usr/bin/python3 ./desktop/build/build_macos.sh
+
+bash desktop/build/build_macos.sh --arch=arm64      # 只打当前架构（更小、更快）
+bash desktop/build/build_macos.sh --clean --rebuild-icon --skip-tests
+```
+
+要点（都是 macOS 特有，Windows 构建不涉及）：
+
+| 事项 | 说明 |
+|---|---|
+| 解释器 | 必须自带 tkinter：`/usr/bin/python3`（Xcode 命令行工具，Tk 8.5）或 python.org 安装包。**PyInstaller 也装在这个解释器里**（本仓库开发时用 venv：`python3 -m venv .venv && .venv/bin/pip install -r requirements-desktop.txt`，再 `PYTHON=.venv/bin/python`） |
+| 图标 | `icon.icns` 由 `desktop/build/make_icns.py` 生成（复用 `make_icon.py` 的纯标准库渲染 + 系统 `iconutil` 打包，1024px 也原生渲染，不放大） |
+| 架构 | 默认 `universal2`（Intel + Apple Silicon 通用）；Xcode 的 Python、PyInstaller 引导器、系统 Tcl/Tk 都是 universal2，所以三片都齐 |
+| Tcl/Tk | macOS 11+ 的 Tcl/Tk 在 dyld 共享缓存里（框架目录只有 stub、没有磁盘二进制），PyInstaller 会打印 `using macOS system Tcl/Tk framework - not collecting data files.` —— **.app 不自带 Tk**，运行时用系统 Tk 8.5（体积因此只有 Windows 版的一半） |
+| 签名 | 构建脚本做 **ad-hoc 签名**（`codesign --force --deep --sign -`，arm64 不加签名无法启动），可用 `codesign --verify --deep --strict` 复验；**未做开发者签名与公证**，别人首次打开要右键「打开」或 `xattr -dr com.apple.quarantine` 去掉隔离标记 |
+| Bundle | `Info.plist` 的 `CFBundleShortVersionString/CFBundleVersion` 从 `desktop/quantstudio_desktop/__init__.py` 的 `__version__` 读，**不重复写版本号**；`LSMinimumSystemVersion=11.0`、`NSHighResolutionCapable=true`（Retina） |
+| 命令行 | 参数照常从 `.app` 内可执行文件传入：`QuantTradingStudio.app/Contents/MacOS/QuantTradingStudio --selftest` / `--mcp --selftest` / `--selftest-gui`（`argv_emulation=False` 保证不被劫持） |
+
+产物在 `desktop/build/output-macos/`：
+
+```
+dist/QuantTradingStudio.app                              # 应用本体（约 20 MB）
+pkg/QuantTradingStudio-macos-universal2.zip              # 约 7.4 MB（ditto 打包，保留符号链接）
+pkg/QuantTradingStudio-macos-universal2.dmg              # 约 8.0 MB（含「应用程序」快捷方式，拖拽安装）
+```
+
+`build_unix.sh` 仍然可用，但它只是「验证 spec 能跑通」——不生成 `.app`/`.icns`、不签名、不打 dmg。
+
 ---
 
 ## 3. 产物
