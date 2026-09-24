@@ -94,6 +94,14 @@ class DocsResources:
             candidates.append(os.path.abspath(PROJECT_DIR))
         except Exception:                          # noqa: BLE001 - 配置不可用时靠包位置兜底
             pass
+        try:
+            import sys
+
+            meipass = getattr(sys, "_MEIPASS", "")          # PyInstaller 解包目录（包根）
+            if meipass:
+                candidates.append(os.path.abspath(meipass))
+        except Exception:                                   # noqa: BLE001
+            pass
         here = os.path.dirname(os.path.abspath(__file__))          # .../quantstudio/mcp
         candidates.append(os.path.dirname(os.path.dirname(os.path.dirname(here))))
         seen: List[str] = []
