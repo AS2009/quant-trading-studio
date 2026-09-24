@@ -320,6 +320,34 @@ const Charts = {
       ],
     });
   },
+
+  /* L2 资金流分时：累计净额折线（values 单位：万元；正净流入红、净流出绿） */
+  flowNet(domId, times, values) {
+    if (!this.hasData(times)) {
+      return this.placeholder(domId, "暂无分时资金流", "该标的当前没有可聚合的逐笔成交样本");
+    }
+    const data = (values || []).map((v) => (v === null || v === undefined ? null : Number(v)));
+    const last = data.length ? data[data.length - 1] : 0;
+    const color = (last === null || last >= 0) ? CHART_COLORS.up : CHART_COLORS.down;
+    this.init(domId, {
+      tooltip: {
+        ...tooltipBase(),
+        valueFormatter: (v) => (v === null || v === undefined ? "—" : Number(v).toFixed(2) + " 万元"),
+      },
+      grid: { left: 68, right: 20, top: 30, bottom: 46 },
+      xAxis: { type: "category", data: times, ...axisBase },
+      yAxis: { type: "value", scale: true, ...axisBase },
+      dataZoom: [{ type: "inside" }, { type: "slider", height: 18, bottom: 8 }],
+      series: [
+        {
+          name: "累计净额(万元)", type: "line", data: data,
+          showSymbol: false, lineStyle: { width: 1.6, color: color },
+          itemStyle: { color: color },
+          areaStyle: { color: "rgba(79,140,255,0.08)" },
+        },
+      ],
+    });
+  },
 };
 
 window.Charts = Charts;

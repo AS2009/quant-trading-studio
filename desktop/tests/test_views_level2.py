@@ -5,8 +5,10 @@
 
 * 用真实的 ``Tk()`` 根窗口（withdraw，不弹窗）+ 真实的 ``TaskRunner``，
   验证「后台线程 → 主线程回调 → 控件更新」这条真实链路；
-* ``services.level2`` 用替身（契约 JSON、固定样例、不联网），含 broken / empty 两种情形；
-* 控件库（``widgets.cards/table``）未交付时页面降级为内联错误，此时跳过依赖具体控件的断言。
+* ``services.level2`` 用替身（契约 JSON、固定样例、不联网），含 broken / empty 两种情形，
+  并覆盖 4 个工具区块（大单追踪 / 资金流分时 / 封板状态 / 扫描与排行）的渲染、空状态、
+  失败内联、``failures`` 提示、排行进行中不阻塞、自动刷新不触发工具；
+* 控件库（``widgets.cards/charts/table``）未交付时页面降级为内联错误，此时跳过依赖具体控件的断言。
 
 运行（GUI 必须用系统自带的 3.9 + tkinter）::
 
@@ -119,6 +121,145 @@ def make_flow(offline=False, empty=False):
         "meta": {"source": "sample", "stale": False, "offline": offline, "as_of": ""},
     }
 
+# ---- 4 个 L2 工具区块的契约 JSON（字段与 backend/services/level2_service.py 一致）
+
+
+TOOL_META = {"source": "sample", "stale": False, "offline": False, "as_of": ""}
+
+
+def make_big_orders(threshold=1000000.0, count=12, empty=False):
+    """大单追踪：时间倒序；偶数下标为卖、奇数下标为买（倒序后第一行是买 → 便于断言买红）。"""
+    items = []
+    for index in range(count):
+        amount = round(threshold * (1.0 + index * 0.1), 2)
+        items.append({
+            "time": "14:%02d:00" % (index + 30),
+            "price": round(1680.0 + index * 0.5, 2),
+            "volume": 100 + index * 10,
+            "amount": amount,
+            "side": "buy" if index % 2 else "sell",
+            "bucket": "super_big" if amount >= 1000000.0 else "big",
+            "bucket_label": "超大单" if amount >= 1000000.0 else "大单",
+        })
+    items.reverse()                             # 契约：时间倒序（最新在前）
+    if empty:
+        items = []
+    buy_amount = round(sum(item["amount"] for item in items if item["side"] == "buy"), 2)
+    sell_amount = round(sum(item["amount"] for item in items if item["side"] == "sell"), 2)
+    gross = buy_amount + sell_amount
+    return {
+        "code": CODE, "name": "贵州茅台", "threshold": threshold,
+        "count": len(items), "shown": len(items), "items": items,
+        "summary": {
+            "count": len(items),
+            "buy_count": sum(1 for item in items if item["side"] == "buy"),
+            "sell_count": sum(1 for item in items if item["side"] == "sell"),
+            "buy_amount": buy_amount, "sell_amount": sell_amount,
+            "net_amount": round(buy_amount - sell_amount, 2),
+            "buy_amount_pct": round(buy_amount / gross * 100.0, 2) if gross else 0.0,
+            "amount_share_pct": 34.56 if gross else 0.0,
+            "biggest": items[0] if items else None,
+        },
+        "tick_sample": 4000,
+        "note": "样本 = 拉取到的逐笔（约覆盖最近 4000 笔）；方向为第三方盘口标记。",
+        "meta": dict(TOOL_META),
+    }
+
+
+def make_flow_series(minutes=6, empty=False):
+    """资金流分时：每分钟净额 (i-2)×3 万，累计净额随之上下（-6/-9/-9/-6/0/+9 万元）。"""
+    series = []
+    cumulative = 0.0
+    for index in range(minutes):
+        net = (index - 2) * 30000.0
+        cumulative += net
+        series.append({
+            "time": "09:%02d" % (31 + index),
+            "buy": 100000.0 + index * 1000.0, "sell": 100000.0 - index * 1000.0,
+            "net": net, "cum_net": round(cumulative, 2),
+            "amount": 500000.0, "count": 20 + index,
+        })
+    if empty:
+        series = []
+    flow = make_flow(empty=empty)
+    return {
+        "code": CODE, "name": "贵州茅台", "minutes": len(series),
+        "tick_sample": 0 if empty else 140, "series": series,
+        "buckets": flow["buckets"],
+        "main_net": flow["main_net"], "main_net_pct": flow["main_net_pct"],
+        "amount_total": flow["amount_total"],
+        "note": "每分钟净额 = 该分钟主动买 − 主动卖（第三方方向标记）；累计净额按时间递增。",
+        "meta": dict(TOOL_META),
+    }
+
+
+def make_seal(state="limit_up", empty=False):
+    """封板状态：默认涨停（封单 12,345 手 / 2.254 亿 / 封成比 12.5%）。"""
+    if empty:
+        seal = {"state": "unknown", "label": "数据不足", "limit_pct": 0.1, "limit_pct_text": "10%",
+                "limit_up_price": 0.0, "limit_down_price": 0.0, "distance_pct": 0.0,
+                "seal_volume": 0, "seal_amount": 0.0, "seal_ratio": 0.0, "amount_total": 0.0}
+        price, prev_close = 0.0, 0.0
+    elif state == "limit_down":
+        seal = {"state": "limit_down", "label": "跌停", "limit_pct": 0.1, "limit_pct_text": "10%",
+                "limit_up_price": 1826.0, "limit_down_price": 1494.0, "distance_pct": 0.0,
+                "seal_volume": 8000, "seal_amount": 119520000.0, "seal_ratio": 6.64,
+                "amount_total": 1800000000.0}
+        price, prev_close = 1494.0, 1660.0
+    else:
+        seal = {"state": "limit_up", "label": "涨停", "limit_pct": 0.1, "limit_pct_text": "10%",
+                "limit_up_price": 1826.0, "limit_down_price": 1494.0, "distance_pct": 0.0,
+                "seal_volume": 12345, "seal_amount": 225400000.0, "seal_ratio": 12.5,
+                "amount_total": 1800000000.0}
+        price, prev_close = 1826.0, 1660.0
+    return {
+        "code": CODE, "name": "贵州茅台", "price": price, "prev_close": prev_close,
+        "seal": seal,
+        "seal_text": "%s（%s）" % (seal["label"], seal["limit_pct_text"]),
+        "note": "只按当前快照判断此刻是否封板；开板次数需要盘中多次采样，不在单次调用里给出。",
+        "meta": dict(TOOL_META),
+    }
+
+
+def make_scan(empty=False):
+    """扫描：契约顺序（600519 委比 12.34 在前），页面应按委比降序重排成 000001 在前。"""
+    items = []
+    if not empty:
+        items = [
+            {"code": "600519.SH", "name": "贵州茅台", "price": 1680.5, "change_pct": 1.23,
+             "imbalance_pct": 12.34, "ratio": 1.28, "spread": 0.01, "bid_volume": 600,
+             "ask_volume": 700, "volume_ratio": 1.5, "seal_state": "limit_up",
+             "seal_label": "涨停", "seal_amount": 225400000.0, "distance_pct": 2.1},
+            {"code": "000001.SZ", "name": "平安银行", "price": 11.2, "change_pct": -0.8,
+             "imbalance_pct": 30.5, "ratio": 1.9, "spread": 0.01, "bid_volume": 4000,
+             "ask_volume": 5000, "volume_ratio": None, "seal_state": "normal",
+             "seal_label": "未封板", "seal_amount": 0.0, "distance_pct": 9.9},
+        ]
+    return {
+        "count": len(items), "requested": len(items), "items": items, "failures": [],
+        "note": "单次快照的静态特征排序；突变检测（挂单骤增/大单撤单）需要两次以上采样，本工具不承诺。",
+        "meta": dict(TOOL_META),
+    }
+
+
+def make_flow_rank(empty=False):
+    """排行：契约顺序把亏的放前面，页面应按主力净额降序重排成 600519 在前。"""
+    items = []
+    if not empty:
+        items = [
+            {"code": "000001.SZ", "name": "平安银行", "main_net": -5000000.0,
+             "main_net_pct": -12.5, "net_amount": -1000000.0, "amount_total": 40000000.0,
+             "tick_count": 900},
+            {"code": "600519.SH", "name": "贵州茅台", "main_net": 1000000.0,
+             "main_net_pct": 7.14, "net_amount": 200000.0, "amount_total": 14000000.0,
+             "tick_count": 140},
+        ]
+    return {
+        "count": len(items), "requested": len(items), "items": items, "failures": [],
+        "note": "主力净额 = 超大单 + 大单净额（按单笔成交额分档自算，样本约最近 4000 笔）。",
+        "meta": dict(TOOL_META),
+    }
+
 
 META_OFFLINE = {"source": "sample", "stale": False, "offline": True,
                 "as_of": "", "notes": ["离线演示"]}
@@ -135,6 +276,8 @@ class FakeLevel2(object):
         self.empty = empty
         self.broken = broken
         self.calls = []
+        self.scan_failure_rows = []             # 测试注入的 failures（逐标的失败）
+        self.rank_failure_rows = []
 
     # ---- 内部
     def _touch(self, name, kwargs):
@@ -166,16 +309,74 @@ class FakeLevel2(object):
         payload["code"] = code
         return self._meta(payload)
 
+    # ---- 契约方法：4 个 L2 工具
+    def big_orders(self, code, threshold=1000000.0, limit=50, sides=None):
+        self._touch("big_orders", {"code": code, "threshold": threshold, "limit": limit,
+                                   "sides": sides})
+        payload = make_big_orders(threshold=threshold, empty=self.empty)
+        payload["code"] = code
+        return self._meta(payload)
+
+    def flow_series(self, code, limit=2000):
+        self._touch("flow_series", {"code": code, "limit": limit})
+        payload = make_flow_series(empty=self.empty)
+        payload["code"] = code
+        return self._meta(payload)
+
+    def seal_status(self, code):
+        self._touch("seal_status", {"code": code})
+        payload = make_seal(empty=self.empty)
+        payload["code"] = code
+        return self._meta(payload)
+
+    def scan(self, codes, limit=10):
+        self._touch("scan", {"codes": list(codes), "limit": limit})
+        payload = make_scan(empty=self.empty)
+        payload["requested"] = len(list(codes))
+        payload["failures"] = [dict(row) for row in self.scan_failure_rows]
+        if payload["failures"]:
+            payload["count"] = max(0, payload["count"] - len(payload["failures"]))
+        return self._meta(payload)
+
+    def flow_rank(self, codes, limit=1000, top=10):
+        self._touch("flow_rank", {"codes": list(codes), "limit": limit, "top": top})
+        payload = make_flow_rank(empty=self.empty)
+        payload["requested"] = len(list(codes))
+        payload["failures"] = [dict(row) for row in self.rank_failure_rows]
+        if payload["failures"]:
+            payload["count"] = max(0, payload["count"] - len(payload["failures"]))
+        return self._meta(payload)
+
     # ---- 断言辅助
     def names(self):
         return [name for name, _kwargs in self.calls]
 
+    def kwargs_of(self, name):
+        """最近一次 ``name`` 调用的参数（没有则 None）。"""
+        for call_name, kwargs in reversed(self.calls):
+            if call_name == name:
+                return kwargs
+        return None
+
 
 class FakeServices(object):
-    """``GuiServices`` 替身：只有页面用到的 level2 命名空间。"""
+    """``GuiServices`` 替身：level2 命名空间 + 自选池（页面用到的全部能力）。"""
 
-    def __init__(self, offline=False, empty=False, broken=False, with_level2=True):
+    def __init__(self, offline=False, empty=False, broken=False, with_level2=True,
+                 watchlist=None, watch_error=None, with_watchlist=True):
         self.level2 = FakeLevel2(offline=offline, empty=empty, broken=broken) if with_level2 else None
+        self._watchlist = list(watchlist or [])
+        self._watch_error = watch_error
+        self._with_watchlist = with_watchlist
+        self.watch_calls = 0
+        if not with_watchlist:
+            self.watchlist = None               # 模拟「服务层没有自选池」：页面要给可读备注
+
+    def watchlist(self):
+        self.watch_calls += 1
+        if self._watch_error:
+            raise RuntimeError(self._watch_error)
+        return list(self._watchlist)
 
 
 class StubToast(object):
@@ -235,6 +436,50 @@ class ConstantsTest(unittest.TestCase):
                          ["time", "price", "volume", "amount_wan", "side"])
         self.assertEqual([column["key"] for column in level2_module.FLOW_COLUMNS],
                          ["label", "buy_wan", "sell_wan", "net_wan", "buy_pct", "count"])
+
+    def test_tool_columns(self):
+        """工具表列定义：顺序与「只有一列着色」的约定（避免多列抢行色）。"""
+        self.assertEqual([column["key"] for column in level2_module.BIG_ORDER_COLUMNS],
+                         ["time", "price", "volume", "amount_wan", "side", "bucket"])
+        self.assertEqual([column["key"] for column in level2_module.SCAN_COLUMNS],
+                         ["code", "name", "price", "change_pct", "imbalance_pct", "diff",
+                          "volume_ratio", "seal", "distance_pct"])
+        self.assertEqual([column["key"] for column in level2_module.RANK_COLUMNS],
+                         ["code", "name", "main_wan", "main_pct", "tick_count"])
+        self.assertEqual([column["key"] for column in level2_module.BIG_ORDER_COLUMNS
+                          if column["kind"] == "badge"], ["side"])
+        self.assertEqual(level2_module.BIG_ORDER_COLUMNS[4]["badge_colors"],
+                         {"买": "up", "卖": "down", "中性": "flat"})
+        for columns, color_key in ((level2_module.SCAN_COLUMNS, "change_pct"),
+                                   (level2_module.RANK_COLUMNS, "main_wan")):
+            numeric = [column["key"] for column in columns
+                       if column["kind"] in ("num", "pct", "int", "money")]
+            self.assertEqual(numeric, [color_key], "每张工具表只允许一列按数值着色")
+
+    def test_tool_constants_and_notes(self):
+        """阈值下拉、上限、耗时提示与口径灰字（页面上必须如实写清）。"""
+        self.assertEqual([label for label, _value in level2_module.BIG_ORDER_THRESHOLDS],
+                         ["20 万", "50 万", "100 万", "200 万"])
+        self.assertEqual(dict(level2_module.BIG_ORDER_THRESHOLDS)["100 万"], 1000000.0)
+        self.assertEqual(level2_module.DEFAULT_BIG_THRESHOLD, 1000000.0)
+        self.assertEqual(level2_module.BIG_ORDER_LIMIT, 50)
+        self.assertEqual(level2_module.TOOL_CODES_MAX, 10)
+        self.assertEqual(level2_module.SCAN_LIMIT, 10)
+        self.assertEqual(level2_module.RANK_LIMIT, 1000)
+        self.assertEqual(level2_module.RANK_TOP, 10)
+        self.assertEqual(level2_module.FLOW_SERIES_LIMIT, level2_module.FLOW_LIMIT)
+        self.assertEqual(level2_module.SEAL_BADGE_KINDS["limit_up"], "up")
+        self.assertEqual(level2_module.SEAL_BADGE_KINDS["limit_down"], "down")
+        for keyword in ("4000 笔", "第三方盘口标记"):
+            self.assertIn(keyword, level2_module.BIG_ORDER_NOTE)
+        self.assertIn("开板次数", level2_module.SEAL_NOTE)
+        self.assertIn("累计净额", level2_module.FLOW_SERIES_NOTE)
+        for keyword in ("进行中", "2–4 分钟"):
+            self.assertIn(keyword, level2_module.RANK_RUNNING_TEXT)
+        self.assertIn("2–4 分钟", level2_module.TOOL_LATENCY_HINT)
+        self.assertIn("不跑下方工具", level2_module.AUTO_REFRESH_SCOPE)
+        self.assertIn("委比降序", level2_module.SCAN_NOTE)
+        self.assertIn("主力净额降序", level2_module.RANK_NOTE)
 
     def test_slot_colors_sell_green_buy_red(self):
         self.assertEqual(level2_module.SLOT_COLORS["卖1"], "down")
@@ -354,6 +599,22 @@ class ViewTestCase(unittest.TestCase):
                 idle = 0
             time.sleep(0.02)
         self.fail("后台任务在 %.1fs 内未完成（pending=%s）" % (timeout, page._pending))
+
+    def wait_until(self, condition, timeout=15.0, message="条件未在 %.1fs 内满足"):
+        """驱动事件循环直到 ``condition()`` 为真（用于「还有任务在飞」的场景，pump 会等不到）。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                self.root.update()
+            except Exception:               # noqa: BLE001 - 控件销毁中
+                pass
+            try:
+                if condition():
+                    return True
+            except Exception:               # noqa: BLE001 - 控件还没渲染好，继续等
+                pass
+            time.sleep(0.02)
+        self.fail(message % timeout)
 
     @staticmethod
     def row_tags(tree, index):
@@ -629,6 +890,418 @@ class ViewTestCase(unittest.TestCase):
         self.assertEqual(len(fake.calls), before, "页面不在前台时不发请求")
         page.pack(fill="both", expand=True)
         page._cancel_auto()
+
+    # ------------------------------------------------------------------ 工具：大单追踪
+    def test_big_orders_block_renders_rows_cards_and_colors(self):
+        app = self.make_app()
+        page = self.open_page(app, code=CODE, query=False)
+        fake = app.services.level2
+        page.big_button.invoke()
+        self.pump(page, app)
+
+        self.assertEqual(fake.kwargs_of("big_orders")["threshold"], level2_module.DEFAULT_BIG_THRESHOLD)
+        self.assertEqual(fake.kwargs_of("big_orders")["limit"], level2_module.BIG_ORDER_LIMIT)
+        self.assertEqual(len(page.big_rows), 12, "替身给 12 笔大单，全部展示")
+        # 时间倒序：最新一笔（index=11）在前，方向买、档位超大单
+        self.assertEqual(page.big_rows[0]["time"], "14:41:00")
+        self.assertEqual(page.big_rows[0]["price"], "1,685.50")
+        self.assertEqual(page.big_rows[0]["volume"], "210")
+        self.assertEqual(page.big_rows[0]["amount_wan"], "210.00")
+        self.assertEqual(page.big_rows[0]["side"], "买")
+        self.assertEqual(page.big_rows[0]["bucket"], "超大单")
+        # 统计行：笔数 / 买 / 卖 / 净额（万元）
+        self.assertEqual(page.big_cards["count"].value_label.cget("text"), "12")
+        self.assertEqual(page.big_cards["buy"].value_label.cget("text"), "960.00")
+        self.assertEqual(page.big_cards["sell"].value_label.cget("text"), "900.00")
+        self.assertEqual(page.big_cards["net"].value_label.cget("text"), "60.00")
+        self.assertIn("买 6 笔 / 卖 6 笔", page.big_cards["count"].sub_label.cget("text"))
+        self.assertIn("占样本成交额", page.big_cards["net"].sub_label.cget("text"))
+        # 标题行与灰字口径（样本 4000 笔 + 第三方盘口标记）
+        self.assertIn("阈值 100 万", page.big_title.cget("text"))
+        self.assertIn("样本 4,000 笔", page.big_title.cget("text"))
+        self.assertIn("最大单笔 210.00 万元", page.big_title.cget("text"))
+        self.assertIn("4000 笔", page.big_note.cget("text"))
+        self.assertIn("第三方盘口标记", page.big_note.cget("text"))
+        self.assertEqual(self.errors(app), [])
+
+        if not WIDGETS_OK:
+            return
+        tree = find_tree(page.big_table)
+        self.assertIsNotNone(tree)
+        self.assertEqual(len(tree.get_children()), 12)
+        self.assertFalse(page.big_table.empty_visible())
+        self.assert_row_color(tree, 0, "up")            # 买 → 红
+        self.assert_row_color(tree, 1, "down")          # 卖 → 绿
+        self.assertEqual(tree.set(tree.get_children()[0], "side"), "买")
+        self.assertEqual(tree.set(tree.get_children()[1], "side"), "卖")
+
+    def test_big_orders_threshold_dropdown_is_passed_through(self):
+        app = self.make_app()
+        page = self.open_page(app, code=CODE, query=False)
+        self.assertEqual(page._selected_threshold(), level2_module.DEFAULT_BIG_THRESHOLD)
+        self.assertEqual([label for label, _value in level2_module.BIG_ORDER_THRESHOLDS],
+                         list(page.big_box.cget("values")))
+        page.big_threshold_var.set("20 万")
+        page.big_button.invoke()
+        self.pump(page, app)
+        self.assertEqual(app.services.level2.kwargs_of("big_orders")["threshold"], 200000.0)
+        self.assertIn("阈值 20 万", page.big_title.cget("text"))
+
+    def test_big_orders_without_code_shows_hint_and_sends_nothing(self):
+        app = self.make_app()
+        page = self.open_page(app, code="")
+        page.big_button.invoke()
+        self.pump(page, app)
+        self.assertEqual(app.services.level2.calls, [], "没有标的时不得发请求")
+        self.assertIn("输入代码", page.big_title.cget("text"))
+        if WIDGETS_OK:
+            self.assertTrue(page.big_table.empty_visible())
+            self.assertIn("输入代码", page.big_table.empty_text)
+
+    # ------------------------------------------------------------------ 工具：资金流分时
+    def test_flow_series_block_draws_chart_and_bucket_cards(self):
+        app = self.make_app()
+        page = self.open_page(app, code=CODE, query=False)
+        page.series_button.invoke()
+        self.pump(page, app)
+
+        # x = 分钟（HH:MM），y = 累计净额 / 1e4 万元
+        self.assertEqual(page.series_labels, ["09:31", "09:32", "09:33", "09:34", "09:35", "09:36"])
+        self.assertEqual(page.series_values, [-6.0, -9.0, -9.0, -6.0, 0.0, 9.0])
+        self.assertEqual(page.series_cards["main"].value_label.cget("text"), "10.00")
+        self.assertEqual(page.series_cards["main_pct"].value_label.cget("text"), "+7.14%")
+        self.assertEqual(page.series_cards["minutes"].value_label.cget("text"), "6")
+        # 四档净额小结：红涨绿跌（数值本身交给 StatCard 按符号着色）
+        self.assertEqual(page.series_bucket_cards["super_big"].value_label.cget("text"), "14.00")
+        self.assertEqual(page.series_bucket_cards["big"].value_label.cget("text"), "-4.00")
+        self.assertEqual(page.series_bucket_cards["mid"].value_label.cget("text"), "3.00")
+        self.assertEqual(page.series_bucket_cards["small"].value_label.cget("text"), "-1.00")
+        self.assertIn("分钟 6 个", page.series_title.cget("text"))
+        self.assertIn("最新累计净额 9.00 万元", page.series_title.cget("text"))
+        self.assertEqual(self.errors(app), [])
+
+        if not WIDGETS_OK:
+            return
+        self.assertTrue(page.flow_chart.has_data(), "折线图必须画出来")
+        # 主力净额为正 → 曲线红（红涨绿跌）
+        self.assertEqual(page.flow_chart.plot_color(), theme.COLORS["up"])
+
+    def test_flow_series_single_minute_shows_inline_empty_state(self):
+        app = self.make_app()
+        page = self.open_page(app, code="", query=False)
+        payload = make_flow_series(minutes=1)
+        page._render_flow_series(payload)
+        self.assertEqual(len(page.series_values), 1)
+        if WIDGETS_OK:
+            self.assertIn("分钟序列不足", page.flow_chart.empty_text)
+        # 无逐笔样本：卡片全部「—」，不留一排 0 假装有数据
+        page._render_flow_series(make_flow_series(empty=True))
+        self.assertEqual(page.series_values, [])
+        for key in level2_module.BUCKET_ORDER:
+            self.assertEqual(page.series_bucket_cards[key].value_label.cget("text"), "—")
+        if WIDGETS_OK:
+            self.assertIn("分钟序列不足", page.flow_chart.empty_text)
+
+    def test_flow_series_error_is_inline(self):
+        app = self.make_app()
+        page = self.open_page(app, code="", query=False)
+        page.code_var.set(CODE)
+        page._on_series_error(RuntimeError("逐笔源超时"))
+        self.assertIn("加载失败", page.series_title.cget("text"))
+        self.assertIn("逐笔源超时", self.status_line(page))
+        if WIDGETS_OK:
+            self.assertIn("加载失败", page.flow_chart.empty_text)
+        self.assertTrue(self.errors(app))
+
+    # ------------------------------------------------------------------ 工具：封板状态
+    def test_seal_block_renders_badge_and_key_values(self):
+        app = self.make_app()
+        page = self.open_page(app, code=CODE, query=False)
+        page.seal_button.invoke()
+        self.pump(page, app)
+
+        self.assertEqual(page.seal_state, "limit_up")
+        self.assertEqual(page.seal_badge.cget("text"), "涨停")
+        self.assertEqual(page.seal_badge.kind, "up")
+        self.assertEqual(page.seal_kv_left.get("现价"), "1,826.00")
+        self.assertEqual(page.seal_kv_left.get("昨收"), "1,660.00")
+        self.assertEqual(page.seal_kv_left.get("涨停价"), "1,826.00")
+        self.assertEqual(page.seal_kv_right.get("封单量（手）"), "12,345")
+        self.assertEqual(page.seal_kv_right.get("封单额（万元）"), "22,540.00")
+        self.assertEqual(page.seal_kv_right.get("封成比 %"), "12.50%")
+        self.assertIn("10%", page.seal_title.cget("text"))
+        self.assertIn("开板次数", page.seal_note.cget("text"))
+        self.assertEqual(self.errors(app), [])
+
+    def test_seal_block_limit_down_and_unknown(self):
+        app = self.make_app()
+        page = self.open_page(app, code="", query=False)
+        page._render_seal(make_seal(state="limit_down"))
+        self.assertEqual(page.seal_state, "limit_down")
+        self.assertEqual(page.seal_badge.cget("text"), "跌停")
+        self.assertEqual(page.seal_badge.kind, "down")
+        self.assertEqual(page.seal_kv_right.get("封成比 %"), "6.64%")
+        page._render_seal(make_seal(empty=True))
+        self.assertEqual(page.seal_state, "unknown")
+        self.assertEqual(page.seal_badge.cget("text"), "数据不足")
+        self.assertEqual(page.seal_badge.kind, "flat")
+        self.assertEqual(page.seal_kv_left.get("涨停价"), "—")
+        self.assertEqual(page.seal_kv_right.get("封单额（万元）"), "—")
+
+    # ------------------------------------------------------------------ 工具：扫描 / 排行
+    def test_scan_block_sorts_by_imbalance_and_reports_failures(self):
+        services = FakeServices(watchlist=["000001.SZ", "600519.SH", "bad-code"])
+        app = self.make_app(services=services)
+        page = self.open_page(app, code=CODE, query=False)
+        fake = app.services.level2
+        fake.scan_failure_rows = [{"code": "300750.SZ", "error": "快照超时"}]
+        page.scan_button.invoke()
+        self.pump(page, app)
+
+        # 标的 = 输入 + 自选池（去重、去掉非法代码）
+        self.assertEqual(fake.kwargs_of("scan")["codes"], [CODE, "000001.SZ"])
+        self.assertEqual(fake.kwargs_of("scan")["limit"], level2_module.SCAN_LIMIT)
+        self.assertIn("本次标的（2 只）", page.tool_codes_label.cget("text"))
+        self.assertIn("000001.SZ", page.tool_codes_label.cget("text"))
+        # 按委比降序：000001（30.5）排在 600519（12.34）前
+        self.assertEqual([row["code"] for row in page.scan_rows], ["000001.SZ", "600519.SH"])
+        self.assertEqual(page.scan_rows[0]["diff"], "-1,000")       # 4000 − 5000 手
+        self.assertEqual(page.scan_rows[0]["volume_ratio"], "—")
+        self.assertEqual(page.scan_rows[0]["seal"], "未封板")
+        self.assertEqual(page.scan_rows[1]["imbalance_pct"], "+12.34%")
+        self.assertIn("成功 2 只 · 失败 1 只", page.scan_title.cget("text"))
+        self.assertIn("失败 1 只", page.scan_failures.cget("text"))
+        self.assertIn("300750.SZ", page.scan_failures.cget("text"))
+        self.assertIn("快照超时", page.scan_failures.cget("text"))
+        self.assertEqual(self.errors(app), [])
+
+        if not WIDGETS_OK:
+            return
+        tree = find_tree(page.scan_table)
+        self.assertEqual(len(tree.get_children()), 2)
+        self.assert_row_color(tree, 0, "down")          # 跌 0.80% → 绿
+        self.assert_row_color(tree, 1, "up")            # 涨 1.23% → 红
+
+    def test_flow_rank_block_sorts_by_main_net(self):
+        app = self.make_app()
+        page = self.open_page(app, code=CODE, query=False)
+        page.include_watch_var.set("0")                 # 只看输入标的
+        fake = app.services.level2
+        fake.rank_failure_rows = [{"code": "300750.SZ", "error": "逐笔拉取失败"}]
+        page.rank_button.invoke()
+        self.pump(page, app)
+
+        self.assertEqual(fake.kwargs_of("flow_rank")["codes"], [CODE])
+        self.assertEqual(fake.kwargs_of("flow_rank")["limit"], level2_module.RANK_LIMIT)
+        self.assertEqual(fake.kwargs_of("flow_rank")["top"], level2_module.RANK_TOP)
+        # 按主力净额降序：+100 万（600519）排在 −500 万（000001）前
+        self.assertEqual([row["code"] for row in page.rank_rows], ["600519.SH", "000001.SZ"])
+        self.assertEqual(page.rank_rows[0]["main_wan"], 100.0)
+        self.assertEqual(page.rank_rows[1]["main_wan"], -500.0)
+        self.assertEqual(page.rank_rows[0]["tick_count"], "140")
+        self.assertIn("失败 1 只", page.rank_failures.cget("text"))
+        self.assertIn("300750.SZ", page.rank_failures.cget("text"))
+        self.assertIn("已完成", page.rank_status.cget("text"))
+        self.assertIn("600519.SH", page.rank_status.cget("text"))
+        self.assertEqual(self.errors(app), [])
+
+        if not WIDGETS_OK:
+            return
+        tree = find_tree(page.rank_table)
+        self.assertEqual(len(tree.get_children()), 2)
+        self.assert_row_color(tree, 0, "up")
+        self.assert_row_color(tree, 1, "down")
+        self.assertEqual(tree.set(tree.get_children()[0], "main_wan"), "100.00")
+        self.assertEqual(tree.set(tree.get_children()[1], "main_wan"), "-500.00")
+
+    def test_rank_running_stays_non_blocking_and_shows_latency_hint(self):
+        """排行进行中：只有它自己的按钮禁用，其它区块照常完成。"""
+        import threading
+
+        app = self.make_app()
+        page = self.open_page(app, code=CODE, query=False)
+        fake = app.services.level2
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_rank(codes, limit=1000, top=10):
+            started.set()
+            release.wait(20.0)
+            payload = make_flow_rank()
+            payload["requested"] = len(list(codes))
+            payload["meta"] = dict(TOOL_META)
+            return payload
+
+        fake.flow_rank = slow_rank
+        page.rank_button.invoke()
+        self.assertTrue(started.wait(10.0), "排行任务应已进入后台线程")
+        # 进行中文案 + 只锁自己
+        self.assertIn("进行中", page.rank_status.cget("text"))
+        self.assertIn("2–4 分钟", page.rank_status.cget("text"))
+        self.assertEqual(str(page.rank_button.cget("state")), "disabled")
+        self.assertEqual(str(page.scan_button.cget("state")), "normal")
+        self.assertEqual(str(page.big_button.cget("state")), "normal")
+        self.assertEqual(str(page.series_button.cget("state")), "normal")
+        self.assertEqual(str(page.seal_button.cget("state")), "normal")
+        self.assertIn("最多约 2–4 分钟", page.rank_table.empty_text)
+
+        # 排行还在飞的时候，大单区块可以正常跑完
+        page.big_button.invoke()
+        self.wait_until(lambda: len(page.big_rows) == 12, message="大单区块应能在排行进行中完成")
+        self.assertGreaterEqual(page._pending, 1, "排行应仍在进行中")
+        self.assertEqual(str(page.rank_button.cget("state")), "disabled")
+
+        release.set()
+        self.wait_until(lambda: len(page.rank_rows) == 2 and str(page.rank_button.cget("state")) == "normal",
+                        message="排行完成后应恢复按钮并渲染结果")
+        self.pump(page, app)
+        self.assertEqual(page._pending, 0)
+        self.assertEqual(len(page.rank_rows), 2)
+
+    def test_tool_blocks_without_codes_fail_inline_without_request(self):
+        app = self.make_app()
+        page = self.open_page(app, code="", query=False)
+        page.include_watch_var.set("0")
+        with redirect_stderr(io.StringIO()):
+            page.scan_button.invoke()
+            page.rank_button.invoke()
+            self.pump(page, app)
+        self.assertEqual(app.services.level2.calls, [])
+        self.assertIn("没有可用标的", page.scan_title.cget("text"))
+        self.assertIn("没有可用标的", page.rank_title.cget("text"))
+        self.assertEqual(str(page.scan_button.cget("state")), "normal")
+        self.assertEqual(str(page.rank_button.cget("state")), "normal")
+
+    def test_tool_codes_resolution_dedup_cap_and_watchlist_failure(self):
+        services = FakeServices(watchlist=["000001.SZ", "sh600519", "bad-code", "300750.SZ"])
+        app = self.make_app(services=services)
+        page = self.open_page(app, code="", query=False)
+        codes, notes = page._resolve_codes("600519", True)
+        self.assertEqual(codes, [CODE, "000001.SZ", "300750.SZ"], "去重 + 规范化 + 去掉非法代码")
+        self.assertEqual(notes, [])
+        codes, _notes = page._resolve_codes("600519", False)
+        self.assertEqual(codes, [CODE], "不勾自选池时只用输入框")
+
+        many = ["%06d.SH" % (600000 + index) for index in range(20)]
+        app2 = self.make_app(services=FakeServices(watchlist=many))
+        page2 = self.open_page(app2, code="", query=False)
+        codes2, notes2 = page2._resolve_codes("", True)
+        self.assertEqual(len(codes2), level2_module.TOOL_CODES_MAX)
+        self.assertTrue(any("只取前 %d 只" % level2_module.TOOL_CODES_MAX in note for note in notes2))
+
+        app3 = self.make_app(services=FakeServices(watchlist=["000001.SZ"], watch_error="磁盘不可读"))
+        page3 = self.open_page(app3, code="", query=False)
+        codes3, notes3 = page3._resolve_codes(CODE, True)
+        self.assertEqual(codes3, [CODE], "自选池读取失败不影响手输标的")
+        self.assertTrue(any("自选池读取失败" in note for note in notes3))
+
+        app4 = self.make_app(services=FakeServices(with_watchlist=False))
+        page4 = self.open_page(app4, code="", query=False)
+        codes4, notes4 = page4._resolve_codes(CODE, True)
+        self.assertEqual(codes4, [CODE])
+        self.assertTrue(any("未提供自选池" in note for note in notes4))
+
+    # ------------------------------------------------------------------ 工具：空 / 失败 / 自动刷新
+    def test_tool_blocks_empty_data_draw_inline_empty_state(self):
+        app = self.make_app(empty=True)
+        page = self.open_page(app, code=CODE, query=False)
+        for button in (page.big_button, page.series_button, page.seal_button, page.scan_button,
+                       page.rank_button):
+            button.invoke()
+        self.pump(page, app)
+
+        self.assertEqual(page._pending, 0)
+        self.assertEqual(page.big_rows, [])
+        self.assertEqual(page.series_values, [])
+        self.assertEqual(page.scan_rows, [])
+        self.assertEqual(page.rank_rows, [])
+        self.assertEqual(page.seal_state, "unknown")
+        self.assertEqual(page.big_cards["count"].value_label.cget("text"), "0")
+        self.assertEqual(page.series_cards["main"].value_label.cget("text"), "—")
+        if WIDGETS_OK:
+            self.assertTrue(page.big_table.empty_visible(), "空大单要显示内联空状态")
+            self.assertIn("没有成交", page.big_table.empty_text)
+            self.assertTrue(page.scan_table.empty_visible())
+            self.assertIn("扫描无结果", page.scan_table.empty_text)
+            self.assertTrue(page.rank_table.empty_visible())
+            self.assertIn("排行无结果", page.rank_table.empty_text)
+            self.assertIn("分钟序列不足", page.flow_chart.empty_text)
+        self.assertEqual(self.errors(app), [], "空数据不是错误：不要弹错误提示")
+        # 按钮全部恢复可用
+        for button in (page.big_button, page.series_button, page.seal_button, page.scan_button,
+                       page.rank_button):
+            self.assertEqual(str(button.cget("state")), "normal")
+
+    def test_tool_blocks_broken_service_shows_inline_failure_and_recovers(self):
+        app = self.make_app(broken=True)
+        with redirect_stderr(io.StringIO()):            # TaskRunner 会打印后台异常堆栈
+            page = self.open_page(app, code=CODE, query=False)
+            for button in (page.big_button, page.series_button, page.seal_button, page.scan_button,
+                           page.rank_button):
+                button.invoke()
+            self.pump(page, app)
+
+        errors = " ".join(self.errors(app))
+        self.assertIn("服务不可用", errors, "服务异常必须提示用户")
+        self.assertGreaterEqual(len(self.errors(app)), 4, "5 个工具失败各自都要有提示")
+        # 每个工具的失败都写在自己的区块里（不弹窗、不互相覆盖）
+        self.assertIn("大单追踪加载失败", page.big_title.cget("text"))
+        self.assertIn("资金流分时加载失败", page.series_title.cget("text"))
+        self.assertIn("封板状态加载失败", page.seal_title.cget("text"))
+        self.assertIn("扫描自选池加载失败", page.scan_title.cget("text"))
+        self.assertIn("资金流排行加载失败", page.rank_title.cget("text"))
+        if WIDGETS_OK:
+            self.assertTrue(page.big_table.empty_visible())
+            self.assertIn("加载失败", page.big_table.empty_text)
+            self.assertIn("服务不可用", page.big_table.empty_text)
+            self.assertIn("加载失败", page.scan_table.empty_text)
+            self.assertIn("加载失败", page.rank_table.empty_text)
+            self.assertIn("加载失败", page.flow_chart.empty_text)
+        self.assertIn("加载失败", page.seal_title.cget("text"))
+        self.assertIn("加载失败", page.rank_title.cget("text"))
+        for button in (page.big_button, page.series_button, page.seal_button, page.scan_button,
+                       page.rank_button):
+            self.assertEqual(str(button.cget("state")), "normal", "失败后要能重试")
+
+    def test_auto_refresh_does_not_run_tool_blocks(self):
+        app = self.make_app()
+        page = self.open_page(app)
+        fake = app.services.level2
+        page.auto_check.invoke()
+        before = len(fake.calls)
+        with redirect_stderr(io.StringIO()):
+            page._auto_tick()
+            self.pump(page, app)
+        names = [name for name, _kwargs in fake.calls[before:]]
+        self.assertEqual(sorted(names), ["capital_flow", "orderbook", "ticks"],
+                         "自动刷新只跑盘口 / 逐笔 / 资金流分档")
+        for tool in ("big_orders", "flow_series", "seal_status", "scan", "flow_rank"):
+            self.assertNotIn(tool, names)
+        page._cancel_auto()
+        # 页面提示也要写明自动刷新的作用范围
+        texts = [widget.cget("text") for widget in descendants(page)
+                 if isinstance(widget, ttk.Label) and "自动刷新" in str(widget.cget("text"))]
+        self.assertTrue(any("不跑下方工具" in text for text in texts),
+                        "自动刷新旁边的灰字要写清不跑工具：%s" % texts)
+
+    def test_tool_blocks_keep_widgets_across_reruns(self):
+        app = self.make_app()
+        page = self.open_page(app, code=CODE, query=False)
+        page.big_button.invoke()
+        self.pump(page, app)
+        before = [id(page.big_table), id(page.big_cards["net"]), id(page.flow_chart),
+                  id(page.seal_badge), id(page.scan_table), id(page.rank_table)]
+        page.big_button.invoke()
+        page.series_button.invoke()
+        page.seal_button.invoke()
+        self.pump(page, app)
+        after = [id(page.big_table), id(page.big_cards["net"]), id(page.flow_chart),
+                 id(page.seal_badge), id(page.scan_table), id(page.rank_table)]
+        self.assertEqual(after, before, "重复查询工具不应重建控件")
+
+    @staticmethod
+    def status_line(page):
+        return page.status_label.cget("text")
 
     @staticmethod
     def errors(app):

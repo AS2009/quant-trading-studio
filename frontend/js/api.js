@@ -132,6 +132,27 @@ const API = {
     API.get("/api/level2/" + encodeURIComponent(code) + "/ticks" + API.qs({ limit: limit })),
   level2Flow: (code, limit) =>
     API.get("/api/level2/" + encodeURIComponent(code) + "/flow" + API.qs({ limit: limit })),
+  /*
+   * L2 工具契约（services/level2_service.py，见 docs/level2.md）：
+   *   big-orders : {code,name,threshold,count,shown,items:[{time,price,volume,amount,side,bucket,bucket_label}],summary,tick_sample,note}
+   *   flow-series: {code,name,minutes,tick_sample,series:[{time,buy,sell,net,cum_net,amount,count}],buckets,main_net,main_net_pct,amount_total,note}
+   *   seal       : {code,name,price,prev_close,seal:{state,label,limit_pct_text,limit_up_price,limit_down_price,distance_pct,seal_volume,seal_amount,seal_ratio},seal_text,note}
+   *   scan       : {count,requested,items:[{code,name,price,change_pct,imbalance_pct,ratio,spread,volume_ratio,seal_state,seal_label,seal_amount,distance_pct}],failures,note}
+   *   flow-rank  : {count,requested,items:[{code,name,main_net,main_net_pct,net_amount,amount_total,tick_count}],failures,note}
+   * codes 可传数组或逗号分隔串（数组会拼成逗号串）；缺省由后端取自选池。
+   */
+  level2BigOrders: (code, threshold, limit) =>
+    API.get("/api/level2/" + encodeURIComponent(code) + "/big-orders" +
+      API.qs({ threshold: threshold, limit: limit })),
+  level2FlowSeries: (code, limit) =>
+    API.get("/api/level2/" + encodeURIComponent(code) + "/flow-series" + API.qs({ limit: limit })),
+  level2Seal: (code) => API.get("/api/level2/" + encodeURIComponent(code) + "/seal"),
+  level2Scan: (codes, limit) =>
+    API.get("/api/level2/scan" + API.qs({ codes: API.codeList(codes), limit: limit })),
+  level2FlowRank: (codes, top, limit) =>
+    API.get("/api/level2/flow-rank" + API.qs({ codes: API.codeList(codes), top: top, limit: limit })),
+  /* codes 数组 → 逗号分隔串（后端按逗号切分；其他类型原样交给 API.qs） */
+  codeList(codes) { return Array.isArray(codes) ? codes.join(",") : codes; },
 
   /* ---------------- 自选池 ---------------- */
   watchlist: () => API.get("/api/watchlist"),

@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
-"""``tools_level2``（盘口 / 逐笔 / 资金流）工具分组的回归测试。
+"""``tools_level2``（盘口 / 逐笔 / 资金流 / L2 工具箱）工具分组的回归测试。
 
 全部用**离线假 Provider** 注入（不联网），数据目录指向临时目录：
 
-* 覆盖三个工具的注册 / JSON Schema / 只读标注 / group=level2；
+* 覆盖 8 个工具的注册 / JSON Schema / 只读标注 / group=level2；
 * 覆盖成功路径（structuredContent 含契约字段）、文本截断与口径说明；
+* 覆盖 L2 工具箱（大单 / 分时 / 封板 / 扫描 / 排行）：缺省自选池、空自选池报错、
+  ``sides`` 与 ``threshold`` / ``limit`` / ``top`` 参数透传；
 * 覆盖缺 code、非法 code、数据源不支持、数据源抛错 → ``isError`` + 可读 hint；
 * 覆盖服务层短 TTL 缓存命中（meta.notes 注明）与 HTTP 路由（信封 / 400 / 502）。
 """
@@ -27,12 +29,13 @@ try:
 except ModuleNotFoundError:                    # pragma: no cover - 取决于运行环境
     create_app = None
 from quantstudio.config import Settings  # noqa: E402
-from quantstudio.core.errors import DataSourceError  # noqa: E402
+from quantstudio.core.errors import DataSourceError, ProviderUnavailable  # noqa: E402
 from quantstudio.core.models import (  # noqa: E402
     CapitalFlow,
     DataMeta,
     OrderBook,
     OrderBookLevel,
+    Quote,
     Tick,
 )
 from quantstudio.mcp import tools_level2  # noqa: E402
@@ -46,13 +49,43 @@ from quantstudio.services.common import cache_clear, normalize_code  # noqa: E40
 # --------------------------------------------------------------------------- 常量与工具清单
 
 CODE = "600519.SH"
+OTHER = "000001.SZ"
 NAME = "贵州茅台"
 
-LEVEL2_TOOLS = ("capital_flow", "level2_orderbook", "level2_ticks")
+#: 本组的全部 8 个工具（3 个既有 + 5 个 L2 工具箱）
+LEVEL2_TOOLS = ("capital_flow", "l2_big_orders", "l2_flow_rank", "l2_flow_series",
+                "l2_scan", "l2_seal_status", "level2_orderbook", "level2_ticks")
+#: 需要 code 参数的 6 个工具
+CODE_TOOLS = ("capital_flow", "l2_big_orders", "l2_flow_series", "l2_seal_status",
+              "level2_orderbook", "level2_ticks")
+#: codes 缺省 = 自选池的 2 个批量工具
+BATCH_TOOLS = ("l2_flow_rank", "l2_scan")
 CONTRACT_META_KEYS = ("source", "stale", "offline", "as_of", "notes")
 
 #: 逐笔假数据的池子上限（与真实源「约 4000 笔」对齐）
 TICK_POOL = 4000
+
+#: 契约字段（与 docs/level2.md §3.4 对齐）
+BIG_ORDERS_KEYS = ("code", "name", "threshold", "count", "shown", "items", "summary",
+                   "tick_sample", "note", "meta", "capabilities")
+BIG_ORDERS_ITEM_KEYS = ("time", "price", "volume", "amount", "side", "bucket", "bucket_label")
+BIG_ORDERS_SUMMARY_KEYS = ("count", "buy_count", "sell_count", "buy_amount", "sell_amount",
+                           "net_amount", "buy_amount_pct", "amount_share_pct", "biggest")
+SERIES_KEYS = ("code", "name", "minutes", "tick_sample", "series", "buckets", "main_net",
+               "main_net_pct", "amount_total", "note", "meta", "capabilities")
+SERIES_ROW_KEYS = ("time", "buy", "sell", "net", "cum_net", "amount", "count")
+SEAL_KEYS = ("state", "label", "limit_pct", "limit_pct_text", "limit_up_price",
+             "limit_down_price", "distance_pct", "seal_volume", "seal_amount", "seal_ratio",
+             "amount_total")
+SEAL_TOOL_KEYS = ("code", "name", "price", "prev_close", "seal", "seal_text", "note", "meta",
+                  "capabilities")
+SCAN_KEYS = ("count", "requested", "items", "failures", "note", "meta", "capabilities")
+SCAN_ROW_KEYS = ("code", "name", "price", "change_pct", "bid_volume", "ask_volume",
+                 "imbalance_pct", "ratio", "spread", "outer_volume", "inner_volume",
+                 "volume_ratio", "seal_state", "seal_label", "seal_amount", "distance_pct")
+RANK_KEYS = ("count", "requested", "items", "failures", "note", "meta", "capabilities")
+RANK_ROW_KEYS = ("code", "name", "main_net", "main_net_pct", "net_amount", "buy_amount",
+                 "sell_amount", "amount_total", "tick_count")
 
 
 # --------------------------------------------------------------------------- 替身数据
@@ -82,6 +115,16 @@ def make_orderbook(code=CODE, source="tencent"):
         outer_volume=1234,
         inner_volume=1001,
     )
+
+
+def make_limit_up_orderbook(code=CODE):
+    """涨停封板盘口：现价 = 涨停价（1240 × 1.1 = 1364.00），买一挂 5000 手封单。"""
+    book = make_orderbook(code=code)
+    book.price = 1364.00
+    book.bids[0].price = 1364.00
+    book.bids[0].volume = 5000
+    book.bids[0].amount = round(1364.00 * 5000 * 100.0, 2)
+    return book
 
 
 def make_ticks(count):
@@ -136,7 +179,7 @@ def make_capital_flow():
 
 
 class FakeLevel2Provider:
-    """离线替身：只认识 600519.SH，支持盘口 / 逐笔 / 资金流三件套。"""
+    """离线替身：只认识 600519.SH，支持盘口 / 逐笔 / 资金流三件套 + 简单快照。"""
 
     name = "fake"
     ORDERBOOK_LEVELS = 5
@@ -151,7 +194,7 @@ class FakeLevel2Provider:
             latency_ms=2,
             notes=["测试替身"],
         )
-        self.calls = {"orderbook": 0, "ticks": 0, "capital_flow": 0}
+        self.calls = {"orderbook": 0, "ticks": 0, "capital_flow": 0, "latest_quotes": 0}
 
     def _check(self, code):
         code = normalize_code(code)
@@ -174,6 +217,21 @@ class FakeLevel2Provider:
         self.calls["capital_flow"] += 1
         return make_capital_flow()
 
+    def latest_quotes(self, codes):
+        """快照替身：给扫描 / 封板工具补上量比、涨跌幅与当日成交额。"""
+        self.calls["latest_quotes"] += 1
+        rows = []
+        for item in codes or []:
+            try:
+                if normalize_code(item) != CODE:
+                    continue
+            except Exception:                     # noqa: BLE001
+                continue
+            rows.append(Quote(code=CODE, name=NAME, price=1236.95, prev_close=1240.00,
+                              change=-3.05, change_pct=-0.25, amount_yi=2.5, volume_ratio=1.5,
+                              ts="2026-09-24 10:00:00", source="tencent"))
+        return rows
+
     def resolve_name(self, code):
         try:
             return NAME if normalize_code(code) == CODE else ""
@@ -182,6 +240,21 @@ class FakeLevel2Provider:
 
     def describe(self):
         return {"name": self.name, "sources": ["tencent"], "available": ["tencent"]}
+
+
+class LimitUpLevel2Provider(FakeLevel2Provider):
+    """涨停替身：盘口封在涨停价，快照给出当日成交额（用于封成比）。"""
+
+    def orderbook(self, code):
+        self._check(code)
+        self.calls["orderbook"] += 1
+        return make_limit_up_orderbook()
+
+    def latest_quotes(self, codes):
+        self.calls["latest_quotes"] += 1
+        return [Quote(code=CODE, name=NAME, price=1364.00, prev_close=1240.00,
+                      change=124.00, change_pct=10.00, amount_yi=3.0, volume_ratio=2.5,
+                      ts="2026-09-24 10:00:00", source="tencent")]
 
 
 class NoCapabilityProvider:
@@ -214,6 +287,75 @@ class BrokenLevel2Provider:
 
     def capital_flow(self, code, limit=2000):
         raise DataSourceError("模拟资金流接口超时")
+
+
+class FakeMarketService:
+    """自选池替身：``watchlist()`` 返回固定代码（记录调用次数）。"""
+
+    def __init__(self, codes):
+        self.codes = list(codes)
+        self.calls = 0
+
+    def watchlist(self):
+        self.calls += 1
+        return list(self.codes)
+
+
+class RecordingLevel2Service:
+    """包一层记录调用参数（``sides`` / ``threshold`` / ``limit`` 透传断言用）。"""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.calls = []
+
+    def big_orders(self, code, threshold=None, limit=None, sides=None):
+        self.calls.append({"name": "big_orders", "code": code, "threshold": threshold,
+                           "limit": limit, "sides": sides})
+        return self.inner.big_orders(code, threshold=threshold, limit=limit, sides=sides)
+
+    def flow_series(self, code, limit=None):
+        self.calls.append({"name": "flow_series", "code": code, "limit": limit})
+        return self.inner.flow_series(code, limit=limit)
+
+    def seal_status(self, code):
+        self.calls.append({"name": "seal_status", "code": code})
+        return self.inner.seal_status(code)
+
+    def scan(self, codes, limit=10):
+        self.calls.append({"name": "scan", "codes": list(codes), "limit": limit})
+        return self.inner.scan(codes, limit=limit)
+
+    def flow_rank(self, codes, limit=1000, top=10):
+        self.calls.append({"name": "flow_rank", "codes": list(codes), "limit": limit,
+                           "top": top})
+        return self.inner.flow_rank(codes, limit=limit, top=top)
+
+
+class ErrorLevel2Service:
+    """服务层替身：L2 工具箱接口一律抛指定异常（模拟数据源不可用 / 离线无数据）。"""
+
+    def __init__(self, error):
+        self.error = error
+        self.calls = []
+
+    def _raise(self, name):
+        self.calls.append(name)
+        raise self.error
+
+    def big_orders(self, *args, **kwargs):
+        self._raise("big_orders")
+
+    def flow_series(self, *args, **kwargs):
+        self._raise("flow_series")
+
+    def seal_status(self, *args, **kwargs):
+        self._raise("seal_status")
+
+    def scan(self, *args, **kwargs):
+        self._raise("scan")
+
+    def flow_rank(self, *args, **kwargs):
+        self._raise("flow_rank")
 
 
 # --------------------------------------------------------------------------- 测试用例
@@ -254,6 +396,16 @@ class McpToolsLevel2TestCase(unittest.TestCase):
     def text_of(self, result):
         return "\n".join(block.get("text", "") for block in (result.get("content") or []))
 
+    def use_market(self, codes):
+        """把自选池替身挂到当前 Services 上（返回替身，便于断言调用次数）。"""
+        market = FakeMarketService(codes)
+        self.services.market = market
+        return market
+
+    def assert_contract(self, data, keys, label=""):
+        for key in keys:
+            self.assertIn(key, data, "%s%s" % (label, key))
+
     # ------------------------------------------------------------------ ① 注册与 schema
     def test_01_registry_and_schemas(self):
         self.assertEqual(self.registry.names(), sorted(LEVEL2_TOOLS))
@@ -270,10 +422,16 @@ class McpToolsLevel2TestCase(unittest.TestCase):
             self.assertTrue(spec.open_world, name)
             self.assertEqual(spec.input_schema.get("type"), "object", name)
             self.assertFalse(spec.input_schema.get("additionalProperties"), name)
-            self.assertEqual(spec.input_schema.get("required"), ["code"], name)
             annotations = spec.to_mcp()["annotations"]
             self.assertTrue(annotations["readOnlyHint"], name)
             self.assertFalse(annotations["destructiveHint"], name)
+            self.assertTrue(annotations["idempotentHint"], name)
+            self.assertTrue(annotations["openWorldHint"], name)
+        for name in CODE_TOOLS:
+            self.assertEqual(self.registry.get(name).input_schema.get("required"), ["code"], name)
+        for name in BATCH_TOOLS:                       # codes 可选（缺省 = 自选池）
+            self.assertNotIn("required", self.registry.get(name).input_schema, name)
+            self.assertIn("codes", self.registry.get(name).input_schema["properties"], name)
         groups = self.registry.groups()
         self.assertEqual(sorted(groups["level2"]), sorted(LEVEL2_TOOLS))
 
@@ -286,14 +444,54 @@ class McpToolsLevel2TestCase(unittest.TestCase):
         flow_schema = self.registry.get("capital_flow").input_schema["properties"]["limit"]
         self.assertEqual(flow_schema["default"], 2000)
         self.assertEqual((flow_schema["minimum"], flow_schema["maximum"]), (1, 4000))
-        self.assertEqual(self.registry.get("level2_orderbook").input_schema["properties"].keys(), {"code"})
+        self.assertEqual(self.registry.get("level2_orderbook").input_schema["properties"].keys(),
+                         {"code"})
 
-        full = build_registry()                         # 工具总数 33 → 36（含本组 3 个）
-        self.assertEqual(len(full), 36)
+        full = build_registry()                         # 工具总数 36 → 41（本组 3 → 8）
+        self.assertEqual(len(full), 41)
         self.assertTrue(set(LEVEL2_TOOLS) <= set(full.names()))
 
+    # ------------------------------------------------------------------ ①b 新增工具 schema
+    def test_02_l2_tool_schemas(self):
+        props = self.registry.get("l2_big_orders").input_schema["properties"]
+        self.assertEqual(set(props), {"code", "threshold", "limit", "sides"})
+        self.assertEqual(props["threshold"]["type"], "number")
+        self.assertEqual(props["threshold"]["default"], 1000000.0)
+        self.assertEqual(props["threshold"]["minimum"], 1.0)
+        self.assertEqual((props["limit"]["default"], props["limit"]["minimum"],
+                          props["limit"]["maximum"]), (50, 1, 200))
+        self.assertEqual(props["sides"]["type"], "array")
+        self.assertEqual(props["sides"]["items"]["type"], "string")
+        self.assertEqual(tools_level2.DEFAULT_BIG_ORDER_THRESHOLD, 1000000.0)
+        self.assertEqual(tools_level2.TEXT_BIG_ORDERS_LIMIT, 30)
+
+        series = self.registry.get("l2_flow_series").input_schema["properties"]
+        self.assertEqual(set(series), {"code", "limit"})
+        self.assertEqual((series["limit"]["default"], series["limit"]["minimum"],
+                          series["limit"]["maximum"]), (2000, 1, 4000))
+        self.assertEqual(tools_level2.TEXT_FLOW_MINUTES, 10)
+
+        self.assertEqual(self.registry.get("l2_seal_status").input_schema["properties"].keys(),
+                         {"code"})
+
+        scan = self.registry.get("l2_scan").input_schema["properties"]
+        self.assertEqual(set(scan), {"codes", "limit"})
+        self.assertEqual(scan["codes"]["type"], "array")
+        self.assertEqual(scan["codes"]["items"]["type"], "string")
+        self.assertEqual(scan["codes"]["maxItems"], 10)
+        self.assertEqual((scan["limit"]["default"], scan["limit"]["minimum"],
+                          scan["limit"]["maximum"]), (10, 1, 10))
+        self.assertEqual(tools_level2.MAX_SCAN_CODES, 10)
+
+        rank = self.registry.get("l2_flow_rank").input_schema["properties"]
+        self.assertEqual(set(rank), {"codes", "limit", "top"})
+        self.assertEqual((rank["limit"]["default"], rank["limit"]["minimum"],
+                          rank["limit"]["maximum"]), (1000, 1, 4000))
+        self.assertEqual((rank["top"]["default"], rank["top"]["minimum"], rank["top"]["maximum"]),
+                         (10, 1, 10))
+
     # ------------------------------------------------------------------ ② 盘口成功路径
-    def test_02_orderbook_success(self):
+    def test_03_orderbook_success(self):
         result = self.call("level2_orderbook", {"code": CODE})
         self.assertFalse(result["isError"], self.text_of(result))
         data = result["structuredContent"]
@@ -333,7 +531,7 @@ class McpToolsLevel2TestCase(unittest.TestCase):
         self.assertIn("买 5 档 / 卖 5 档", text)
 
     # ------------------------------------------------------------------ ③ 逐笔成功路径与文本截断
-    def test_03_ticks_success_and_truncation(self):
+    def test_04_ticks_success_and_truncation(self):
         result = self.call("level2_ticks", {"code": CODE})
         self.assertFalse(result["isError"], self.text_of(result))
         data = result["structuredContent"]
@@ -366,7 +564,7 @@ class McpToolsLevel2TestCase(unittest.TestCase):
         self.assertIn("完整 120 条", self.text_of(larger))
 
     # ------------------------------------------------------------------ ④ 资金流成功路径
-    def test_04_capital_flow_success(self):
+    def test_05_capital_flow_success(self):
         result = self.call("capital_flow", {"code": CODE})
         self.assertFalse(result["isError"], self.text_of(result))
         data = result["structuredContent"]
@@ -389,9 +587,272 @@ class McpToolsLevel2TestCase(unittest.TestCase):
         self.assertIn("主力净额", text)
         self.assertIn("约覆盖最近 4000 笔", text)
 
-    # ------------------------------------------------------------------ ⑤ 缺少 / 非法 code
-    def test_05_missing_and_invalid_code(self):
-        for name in LEVEL2_TOOLS:
+    # ------------------------------------------------------------------ ⑥ 大单追踪
+    def test_06_l2_big_orders_success(self):
+        result = self.call("l2_big_orders", {"code": CODE})
+        self.assertFalse(result["isError"], self.text_of(result))
+        data = result["structuredContent"]
+        self.assert_contract(data, BIG_ORDERS_KEYS)
+        self.assertEqual(data["code"], CODE)
+        self.assertEqual(data["name"], NAME)
+        self.assertEqual(data["threshold"], 1000000.0)
+        self.assertEqual(data["tick_sample"], 2000)     # max(50*20, 2000)
+        self.assertGreater(data["count"], 0)
+        self.assertEqual(data["shown"], len(data["items"]))
+        for item in data["items"]:
+            self.assertEqual(set(item), set(BIG_ORDERS_ITEM_KEYS))
+        self.assert_contract(data["summary"], BIG_ORDERS_SUMMARY_KEYS)
+        self.assertTrue(data["summary"]["biggest"])
+        self.assertIn("超大单", data["summary"]["biggest"]["bucket_label"])
+        times = [row["time"] for row in data["items"]]
+        self.assertEqual(times, sorted(times, reverse=True))     # 服务层按时间倒序
+        self.assertIn("约覆盖最近 4000 笔", data["note"])
+        self.assertIn("第三方", data["note"])
+
+        text = self.text_of(result)
+        self.assertIn("大单追踪", text)
+        self.assertIn("时间倒序", text)
+        self.assertIn("统计：大单", text)
+        self.assertIn("净额", text)
+        self.assertIn("占样本成交额", text)
+        self.assertIn("最大单笔", text)
+        self.assertIn("约覆盖最近 4000 笔", text)
+        self.assertIn("第三方盘口标记", text)
+        self.assertIn("金额(万元)", text)
+        self.assertIn("档位", text)
+        self.assertIn("超大单", text)                   # 100 万门槛 = 超大单分档线
+        self.assertIn("文本只列时间倒序前 30 条", text)  # 默认 limit=50 → 文本截断到 30
+        self.assertEqual(tools_level2.TEXT_BIG_ORDERS_LIMIT, 30)
+
+        # 更低样本 / 更高门槛：没有命中时文本也要可读
+        empty = self.call("l2_big_orders", {"code": CODE, "threshold": 900000000})
+        self.assertFalse(empty["isError"], self.text_of(empty))
+        self.assertEqual(empty["structuredContent"]["count"], 0)
+        self.assertIn("没有单笔 ≥ 门槛的成交", self.text_of(empty))
+        self.assertIn("最大单笔：无", self.text_of(empty))
+
+    # ------------------------------------------------------------------ ⑦ sides / 参数透传
+    def test_07_l2_big_orders_params_passthrough(self):
+        services = Services(settings=self.settings, provider=self.provider)
+        recorder = RecordingLevel2Service(services.level2)
+        services.level2 = recorder
+        services.market = FakeMarketService([CODE])
+
+        result = self.call("l2_big_orders",
+                           {"code": CODE, "threshold": 500000, "limit": 5, "sides": ["sell"]},
+                           services=services)
+        self.assertFalse(result["isError"], self.text_of(result))
+        data = result["structuredContent"]
+        self.assertEqual(recorder.calls[-1]["code"], CODE)
+        self.assertEqual(recorder.calls[-1]["threshold"], 500000)
+        self.assertEqual(recorder.calls[-1]["limit"], 5)
+        self.assertEqual(recorder.calls[-1]["sides"], ["sell"])   # sides 原样透传
+        self.assertEqual(data["threshold"], 500000.0)
+        self.assertEqual(len(data["items"]), 5)
+        for item in data["items"]:
+            self.assertEqual(item["side"], "sell")
+        self.assertIn("≥ 50.00 万元", self.text_of(result))
+
+        # 缺省 sides → None（买卖都看）
+        defaults = self.call("l2_big_orders", {"code": CODE, "limit": 3}, services=services)
+        self.assertFalse(defaults["isError"], self.text_of(defaults))
+        self.assertIsNone(recorder.calls[-1]["sides"])
+        self.assertEqual(recorder.calls[-1]["threshold"], 1000000.0)
+
+    # ------------------------------------------------------------------ ⑧ 资金流分时
+    def test_08_l2_flow_series_success(self):
+        result = self.call("l2_flow_series", {"code": CODE})
+        self.assertFalse(result["isError"], self.text_of(result))
+        data = result["structuredContent"]
+        self.assert_contract(data, SERIES_KEYS)
+        self.assertEqual(data["code"], CODE)
+        self.assertEqual(data["name"], NAME)
+        self.assertEqual(data["tick_sample"], 2000)
+        self.assertGreater(data["minutes"], 10)
+        self.assertEqual(data["minutes"], len(data["series"]))
+        for row in data["series"]:
+            self.assertEqual(set(row), set(SERIES_ROW_KEYS))
+        for key in ("super_big", "big", "mid", "small"):
+            row = data["buckets"][key]
+            for field in ("label", "buy", "sell", "net", "count", "buy_pct"):
+                self.assertIn(field, row, "%s.%s" % (key, field))
+        self.assertIn("main_net", data)
+        self.assertIn("main_net_pct", data)
+
+        text = self.text_of(result)
+        self.assertIn("资金流分时", text)
+        self.assertIn("主力净额", text)
+        self.assertIn("四档净额", text)
+        self.assertIn("超大单", text)
+        self.assertIn("最近 10 分钟", text)              # 只列最近 10 分钟
+        self.assertIn("累计净额", text)
+        self.assertIn("第三方方向标记", text)
+        self.assertIn("文本只列最近 10 分钟", text)
+        self.assertIn("完整 %d 分钟序列见结构化 series" % data["minutes"], text)
+
+    # ------------------------------------------------------------------ ⑨ 封板状态
+    def test_09_l2_seal_status(self):
+        result = self.call("l2_seal_status", {"code": CODE})
+        self.assertFalse(result["isError"], self.text_of(result))
+        data = result["structuredContent"]
+        self.assert_contract(data, SEAL_TOOL_KEYS)
+        self.assertEqual(data["code"], CODE)
+        self.assertEqual(data["name"], NAME)
+        self.assert_contract(data["seal"], SEAL_KEYS)
+        seal = data["seal"]
+        self.assertEqual(seal["state"], "normal")
+        self.assertEqual(seal["label"], "未封板")
+        self.assertAlmostEqual(seal["limit_pct"], 0.10, places=4)
+        self.assertIn("主板 10%", seal["limit_pct_text"])
+        self.assertAlmostEqual(seal["limit_up_price"], 1364.00, places=2)
+        self.assertAlmostEqual(seal["limit_down_price"], 1116.00, places=2)
+        self.assertAlmostEqual(seal["distance_pct"], 10.27, places=2)
+        self.assertEqual(seal["seal_volume"], 0)
+        self.assertEqual(seal["seal_amount"], 0.0)
+        self.assertEqual(seal["seal_ratio"], 0.0)
+        self.assertAlmostEqual(seal["amount_total"], 250000000.0, places=2)
+
+        text = self.text_of(result)
+        self.assertIn("封板状态", text)
+        self.assertIn("状态：未封板", text)
+        self.assertIn("涨跌停幅度", text)
+        self.assertIn("涨停价 1364.00", text)
+        self.assertIn("距涨停", text)
+        self.assertIn("封单：0 手", text)
+        self.assertIn("封成比", text)
+        self.assertIn("仅当前快照", text)
+        self.assertIn("不承诺", text)
+
+        # 涨停 + 封单路径（成交量 3 亿元 → 封成比 ≈ 227%）
+        # 上面那次调用把封板结果写进了进程级短缓存（key 与标的绑定），先清掉再换数据源
+        cache_clear("level2:seal:%s" % CODE)
+        limit_up = self.call("l2_seal_status", {"code": CODE},
+                             services=Services(settings=self.settings,
+                                               provider=LimitUpLevel2Provider()))
+        self.assertFalse(limit_up["isError"], self.text_of(limit_up))
+        seal = limit_up["structuredContent"]["seal"]
+        self.assertEqual(seal["state"], "limit_up")
+        self.assertEqual(seal["label"], "涨停")
+        self.assertEqual(seal["seal_volume"], 5000)
+        self.assertAlmostEqual(seal["seal_amount"], 682000000.0, places=2)
+        self.assertAlmostEqual(seal["seal_ratio"], 227.33, places=2)
+        sealed_text = self.text_of(limit_up)
+        self.assertIn("状态：涨停", sealed_text)
+        self.assertIn("已封板", sealed_text)
+        self.assertIn("封单：5000 手", sealed_text)
+        self.assertIn("227.33%", sealed_text)
+
+    # ------------------------------------------------------------------ ⑩ 盘口扫描
+    def test_10_l2_scan_watchlist_and_rows(self):
+        market = self.use_market([CODE, OTHER])
+        result = self.call("l2_scan", {"limit": 5})
+        self.assertFalse(result["isError"], self.text_of(result))
+        data = result["structuredContent"]
+        self.assert_contract(data, SCAN_KEYS)
+        self.assertEqual(market.calls, 1)               # 缺省取自选池
+        self.assertTrue(data["from_watchlist"])
+        self.assertEqual(data["requested"], 2)
+        self.assertEqual(data["count"], 1)              # 000001.SZ 让替身抛出 → failures
+        self.assertEqual(len(data["failures"]), 1)
+        self.assertIn("000001.SZ", data["failures"][0]["code"])
+        row = data["items"][0]
+        self.assert_contract(row, SCAN_ROW_KEYS, "row.")
+        self.assertEqual(row["code"], CODE)
+        self.assertEqual(row["name"], NAME)
+        self.assertAlmostEqual(row["change_pct"], -0.25, places=2)
+        self.assertAlmostEqual(row["volume_ratio"], 1.5, places=2)
+        self.assertEqual(row["seal_state"], "normal")
+
+        text = self.text_of(result)
+        self.assertIn("盘口异动扫描", text)
+        self.assertIn("自选池 2 只", text)
+        self.assertIn("代码", text)
+        self.assertIn("委比", text)
+        self.assertIn("买盘占优", text)                  # 委差方向（委买 > 委卖）
+        self.assertIn("量比", text)
+        self.assertIn("1.50", text)
+        self.assertIn("距涨停 10.27%", text)
+        self.assertIn("最多 10 只", text)
+        self.assertIn("失败：000001.SZ", text)
+        self.assertIn(NAME, text)
+
+        # 显式 codes：不读自选池，且按委比排序
+        explicit = self.call("l2_scan", {"codes": [CODE]})
+        self.assertFalse(explicit["isError"], self.text_of(explicit))
+        self.assertEqual(market.calls, 1)               # 没有再次读自选池
+        payload = explicit["structuredContent"]
+        self.assertFalse(payload["from_watchlist"])
+        self.assertEqual(payload["requested"], 1)
+        self.assertIn("指定 1 只", self.text_of(explicit))
+
+    # ------------------------------------------------------------------ ⑪ 扫描 / 排行：空自选池
+    def test_11_l2_batch_empty_watchlist(self):
+        for name in BATCH_TOOLS:
+            self.use_market([])                         # 自选池为空
+            result = self.call(name, {})
+            self.assertTrue(result["isError"], name)
+            error = result["structuredContent"]["error"]
+            self.assertEqual(error["code"], "NO_CODES", name)
+            text = self.text_of(result)
+            self.assertIn("自选池为空", text, name)
+            self.assertIn("codes", text, name)
+            self.assertIn("建议：", text, name)
+            self.assertIn("watchlist_add", text, name)
+
+    # ------------------------------------------------------------------ ⑫ 资金流排行
+    def test_12_l2_flow_rank(self):
+        rank = self.registry.get("l2_flow_rank")
+        self.assertNotIn("required", rank.input_schema)
+        market = self.use_market([CODE, OTHER])
+        result = self.call("l2_flow_rank", {"limit": 1000, "top": 10})
+        self.assertFalse(result["isError"], self.text_of(result))
+        data = result["structuredContent"]
+        self.assert_contract(data, RANK_KEYS)
+        self.assertEqual(market.calls, 1)
+        self.assertTrue(data["from_watchlist"])
+        self.assertEqual(data["requested"], 2)
+        self.assertEqual(data["count"], 1)              # 000001.SZ 逐笔失败 → failures
+        self.assertEqual(len(data["failures"]), 1)
+        row = data["items"][0]
+        self.assert_contract(row, RANK_ROW_KEYS, "row.")
+        self.assertEqual(row["code"], CODE)
+        self.assertEqual(row["tick_count"], 1000)
+        main_nets = [item["main_net"] for item in data["items"]]
+        self.assertEqual(main_nets, sorted(main_nets, reverse=True))
+
+        text = self.text_of(result)
+        self.assertIn("资金流排行", text)
+        self.assertIn("自选池 2 只", text)
+        self.assertIn("主力净额", text)
+        self.assertIn("占比", text)
+        self.assertIn("每只约 10–25 秒，最多 10 只", text)
+        self.assertIn("失败：000001.SZ", text)
+        self.assertIn(NAME, text)
+
+        # 显式 codes + top：参数透传（top 会夹到 1-10，limit 夹到 1-4000）
+        services = Services(settings=self.settings, provider=self.provider)
+        recorder = RecordingLevel2Service(services.level2)
+        services.level2 = recorder
+        services.market = FakeMarketService([CODE])
+        explicit = self.call("l2_flow_rank", {"codes": [CODE], "limit": 300, "top": 3},
+                             services=services)
+        self.assertFalse(explicit["isError"], self.text_of(explicit))
+        self.assertEqual(recorder.calls[-1]["codes"], [CODE])
+        self.assertEqual(recorder.calls[-1]["limit"], 300)
+        self.assertEqual(recorder.calls[-1]["top"], 3)
+        self.assertEqual(explicit["structuredContent"]["items"][0]["tick_count"], 300)
+        self.assertFalse(explicit["structuredContent"]["from_watchlist"])
+
+        # 扫描的参数透传（codes / limit）
+        scanning = self.call("l2_scan", {"codes": [CODE], "limit": 3}, services=services)
+        self.assertFalse(scanning["isError"], self.text_of(scanning))
+        self.assertEqual(recorder.calls[-1]["name"], "scan")
+        self.assertEqual(recorder.calls[-1]["codes"], [CODE])
+        self.assertEqual(recorder.calls[-1]["limit"], 3)
+
+    # ------------------------------------------------------------------ ⑬ 缺少 / 非法 code
+    def test_13_missing_and_invalid_code(self):
+        for name in CODE_TOOLS:
             result = self.call(name, {})
             self.assertTrue(result["isError"], name)
             error = result["structuredContent"]["error"]
@@ -408,8 +869,19 @@ class McpToolsLevel2TestCase(unittest.TestCase):
         self.assertEqual(bad["structuredContent"]["error"]["code"], "VALIDATION")
         self.assertTrue(self.text_of(bad).strip())
 
-    # ------------------------------------------------------------------ ⑥ 数据源不可用 / 抛错
-    def test_06_source_errors_are_readable(self):
+        for name in ("l2_big_orders", "l2_flow_series", "l2_seal_status"):
+            bad_batch = self.call(name, {"code": "abc"})
+            self.assertTrue(bad_batch["isError"], name)
+            self.assertTrue(self.text_of(bad_batch).strip(), name)
+
+        # 白名单：不认识的参数被挡住（sides / codes 拼错能及时反馈）
+        typo = self.call("l2_big_orders", {"code": CODE, "side": ["buy"]})
+        self.assertTrue(typo["isError"])
+        self.assertEqual(typo["structuredContent"]["error"]["code"], "INVALID_ARGS")
+        self.assertIn("side", self.text_of(typo))
+
+    # ------------------------------------------------------------------ ⑭ 数据源不可用 / 抛错
+    def test_14_source_errors_are_readable(self):
         # ① 数据源没有盘口级能力 → 业务异常（不是 500），工具转 isError + hint
         unsupported = Services(settings=self.settings, provider=NoCapabilityProvider())
         for name, args in (("level2_orderbook", {"code": CODE}),
@@ -436,12 +908,44 @@ class McpToolsLevel2TestCase(unittest.TestCase):
             self.assertIn("system_status", self.text_of(result), name)
 
         # ③ 未知标的（替身抛 DataSourceError）→ isError 而不是协议错误
-        unknown = self.call("level2_orderbook", {"code": "000001.SZ"})
+        unknown = self.call("level2_orderbook", {"code": OTHER})
         self.assertTrue(unknown["isError"])
-        self.assertIn("000001.SZ", self.text_of(unknown))
+        self.assertIn(OTHER, self.text_of(unknown))
 
-    # ------------------------------------------------------------------ ⑦ 短 TTL 缓存
-    def test_07_short_ttl_cache_and_meta(self):
+    # ------------------------------------------------------------------ ⑮ L2 工具箱的服务层异常
+    def test_15_l2_tools_service_errors(self):
+        cases = ((DataSourceError("模拟 L2 工具接口超时"), "模拟"),
+                 (ProviderUnavailable("离线模式下没有取到 600519.SH 的逐笔成交数据"), "离线"))
+        for error, marker in cases:
+            services = Services(settings=self.settings, provider=self.provider)
+            services.level2 = ErrorLevel2Service(error)
+            services.market = FakeMarketService([CODE])          # 批量工具缺省自选池
+            for name, args in (("l2_big_orders", {"code": CODE}),
+                               ("l2_flow_series", {"code": CODE}),
+                               ("l2_seal_status", {"code": CODE}),
+                               ("l2_scan", {}),
+                               ("l2_flow_rank", {})):
+                result = self.call(name, args, services=services)
+                self.assertTrue(result["isError"], name)
+                payload = result["structuredContent"]["error"]
+                self.assertEqual(payload["code"], "SERVICE", name)
+                self.assertIn(marker, payload["message"], name)
+                text = self.text_of(result)
+                self.assertIn("建议：", text, name)              # hint 可读
+                self.assertIn("system_status", text, name)
+                self.assertIn("watchlist_add" if name in BATCH_TOOLS else "标的代码", text, name)
+
+        # 数据源抛错但被批量工具逐只容错 → 不是 isError，失败写在 failures 里
+        broken = Services(settings=self.settings, provider=BrokenLevel2Provider())
+        broken.market = FakeMarketService([CODE])
+        partial = self.call("l2_scan", {}, services=broken)
+        self.assertFalse(partial["isError"], self.text_of(partial))
+        self.assertEqual(partial["structuredContent"]["count"], 0)
+        self.assertEqual(len(partial["structuredContent"]["failures"]), 1)
+        self.assertIn("模拟", partial["structuredContent"]["failures"][0]["error"])
+
+    # ------------------------------------------------------------------ ⑯ 短 TTL 缓存
+    def test_16_short_ttl_cache_and_meta(self):
         service = self.services.level2
         self.assertEqual(service.ttl_orderbook, 2.0)
         self.assertEqual(service.ttl_ticks, 10.0)
@@ -456,6 +960,16 @@ class McpToolsLevel2TestCase(unittest.TestCase):
         self.assertFalse(any("缓存" in str(item) for item in
                              first["structuredContent"]["meta"]["notes"]))
 
+        # L2 工具箱同样走短缓存（大单 10 秒）
+        first_big = self.call("l2_big_orders", {"code": CODE})
+        ticks_after_first = self.provider.calls["ticks"]
+        second_big = self.call("l2_big_orders", {"code": CODE})
+        self.assertFalse(first_big["isError"])
+        self.assertFalse(second_big["isError"])
+        self.assertEqual(self.provider.calls["ticks"], ticks_after_first)
+        self.assertTrue(any("缓存" in str(item) for item in
+                            second_big["structuredContent"]["meta"]["notes"]))
+
         # ttl=0 关闭缓存：每次调用都取数
         cache_clear("level2:orderbook:%s" % CODE)
         standalone = Level2Service(provider=self.provider, settings=self.settings,
@@ -464,9 +978,9 @@ class McpToolsLevel2TestCase(unittest.TestCase):
         standalone.orderbook(CODE)
         self.assertEqual(self.provider.calls["orderbook"], 3)
 
-    # ------------------------------------------------------------------ ⑧ HTTP 路由
+    # ------------------------------------------------------------------ ⑰ HTTP 路由
     @unittest.skipIf(create_app is None, "缺少 Flask（quantstudio.api 不可用）")
-    def test_08_http_routes(self):
+    def test_17_http_routes(self):
         app = create_app(settings=self.settings, services=self.services)
         client = app.test_client()
 

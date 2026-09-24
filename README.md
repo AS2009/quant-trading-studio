@@ -28,7 +28,7 @@ git clone <this-repo> && cd quant-trading-studio
    月度收益、绩效指标（年化/夏普/索提诺/卡玛/Alpha/Beta/胜率/盈亏比/换手/费用）、成交流水、期末持仓。
 4. **持仓管理** — 录入你的**真实持仓**（数量/成本/可用数量/现金），实时估值、盈亏与配置分析、权益曲线。
 5. **交易（模拟盘）** — 按实时价格模拟成交（T+1、手续费、涨跌停约束），下单/撤单/持仓/成交全部本地记账。
-6. **盘口 / L2** — 五档盘口（委比/委差/价差）、逐笔成交（第三方方向标记）、由逐笔自算的四档资金流与主力净额；
+6. **盘口 / L2** — 五档盘口（委比/委差/价差）、逐笔成交（第三方方向标记）、自算四档资金流与主力净额，外加 **L2 工具箱**：大单追踪、资金流分时、封板状态（封单/封成比）、自选池盘口扫描、资金流排行；
    十档 / 逐笔委托 / 委托队列需付费授权，见 [docs/level2.md](docs/level2.md)。
 
 命令行也能用（无需启动网页）：
@@ -69,7 +69,7 @@ python scripts/mcp_server.py              # stdio 服务器（默认可读写）
 python scripts/mcp_server.py --read-only  # 一键只读；--selftest 自检，退出码 0/1
 ```
 
-仓库根的 `.mcp.json` 已配好 Claude Code；客户端接入、36 个工具清单、安全护栏与排障见 **[docs/mcp.md](docs/mcp.md)**。
+仓库根的 `.mcp.json` 已配好 Claude Code；客户端接入、41 个工具清单、安全护栏与排障见 **[docs/mcp.md](docs/mcp.md)**。
 
 ---
 
@@ -274,6 +274,11 @@ python scripts/run_backtest.py --strategy st_my_alpha --symbols 600519.SH --star
 | GET | `/api/level2/<code>/orderbook` | 五档盘口 + 委比/委差 + 能力协商 |
 | GET | `/api/level2/<code>/ticks?limit=120` | 逐笔成交（含多空统计） |
 | GET | `/api/level2/<code>/flow?limit=2000` | 四档资金流与主力净额（自算） |
+| GET | `/api/level2/<code>/big-orders?threshold=&limit=` | 大单追踪（单笔金额 ≥ 阈值，时间倒序） |
+| GET | `/api/level2/<code>/flow-series?limit=` | 资金流分时序列（分钟聚合 + 累计净额） |
+| GET | `/api/level2/<code>/seal` | 封板状态（涨停/跌停、封单额、封成比） |
+| GET | `/api/level2/scan?codes=&limit=` | 盘口异动扫描（缺省=自选池，最多 10 只，按委比降序） |
+| GET | `/api/level2/flow-rank?codes=&top=` | 资金流排行（缺省=自选池，按主力净额降序） |
 | GET | `/api/market/kline?code=&days=&freq=day&adjust=qfq` | K 线 |
 | GET/POST/DELETE | `/api/watchlist` `/api/watchlist/<code>` | 自选池读写 |
 | GET/POST | `/api/strategies` | 策略列表 / 新建自定义策略 |

@@ -4,7 +4,8 @@
 from flask import Blueprint, current_app, jsonify, request
 
 from ..core.errors import ValidationError
-from ..services.common import envelope, normalize_codes, parse_adjust, parse_freq, parse_int
+from ..services.common import (envelope, normalize_codes, parse_adjust, parse_float, parse_freq,
+                               parse_int)
 from ..services.level2_service import DEFAULT_FLOW_LIMIT, DEFAULT_TICKS_LIMIT, MAX_TICKS
 from .errors import json_body
 
@@ -129,3 +130,70 @@ def level2_capital_flow(code):
         clamp=True,
     )
     return _level2_envelope(services.level2.capital_flow(code, limit=limit))
+
+
+# --------------------------------------------------------------------------- L2 工具
+
+@bp.route("/level2/<code>/big-orders")
+def level2_big_orders(code):
+    """大单追踪：单笔金额 ≥ threshold（元，默认 100 万）的成交，时间倒序。"""
+    services = _services()
+    threshold = parse_float(
+        request.args.get("threshold"),
+        "threshold",
+        default=1_000_000.0,
+        minimum=1.0,
+    )
+    limit = parse_int(request.args.get("limit"), "limit", default=50, minimum=1, maximum=200,
+                      clamp=True)
+    sides = [item for item in (request.args.get("sides") or "").split(",") if item.strip()]
+    return _level2_envelope(services.level2.big_orders(code, threshold=threshold, limit=limit,
+                                                       sides=sides or None))
+
+
+@bp.route("/level2/<code>/flow-series")
+def level2_flow_series(code):
+    """资金流分时序列（逐笔按分钟聚合，含累计净额）。"""
+    services = _services()
+    limit = parse_int(request.args.get("limit"), "limit", default=DEFAULT_FLOW_LIMIT,
+                      minimum=1, maximum=MAX_TICKS, clamp=True)
+    return _level2_envelope(services.level2.flow_series(code, limit=limit))
+
+
+@bp.route("/level2/<code>/seal")
+def level2_seal(code):
+    """封板状态：此刻是否涨停/跌停、封单量与封成比、距涨停幅度。"""
+    return _level2_envelope(_services().level2.seal_status(code))
+
+
+@bp.route("/level2/scan")
+def level2_scan():
+    """盘口异动扫描：``codes`` 逗号分隔（缺省=自选池），最多 10 只，按委比降序。"""
+    services = _services()
+    codes = _resolve_codes(services, request.args.get("codes"))
+    limit = parse_int(request.args.get("limit"), "limit", default=10, minimum=1, maximum=10,
+                      clamp=True)
+    return _level2_envelope(services.level2.scan(codes, limit=limit))
+
+
+@bp.route("/level2/flow-rank")
+def level2_flow_rank():
+    """个股资金流排行：``codes`` 逗号分隔（缺省=自选池），最多 10 只，按主力净额降序。"""
+    services = _services()
+    codes = _resolve_codes(services, request.args.get("codes"))
+    top = parse_int(request.args.get("top"), "top", default=10, minimum=1, maximum=10, clamp=True)
+    limit = parse_int(request.args.get("limit"), "limit", default=1000, minimum=1, maximum=MAX_TICKS,
+                      clamp=True)
+    return _level2_envelope(services.level2.flow_rank(codes, limit=limit, top=top))
+
+
+def _resolve_codes(services, raw):
+    """``codes`` 参数 → 标的列表；缺省用自选池（保持自选池顺序，去掉空值）。"""
+    items = [part.strip() for part in str(raw or "").split(",")]
+    codes = [item for item in items if item]
+    if codes:
+        return codes
+    try:
+        return list(services.market.watchlist())
+    except Exception:                             # noqa: BLE001 - 自选池不可用时交给服务层报错
+        return []

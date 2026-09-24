@@ -27,7 +27,7 @@ from .tools import build_registry
 
 REPORT_FILENAME = "quantstudio_mcp_selftest.txt"
 #: ``build_registry()`` 里注册的工具总数（--read-only 只隐藏写工具；新增工具组时同步更新）
-EXPECTED_TOOL_COUNT = 36
+EXPECTED_TOOL_COUNT = 41
 
 
 # --------------------------------------------------------------------------- 装配

@@ -18,7 +18,7 @@ import math
 from typing import Any, Dict, List, Optional
 
 from ..config import Settings, get_settings
-from ..core.errors import DataSourceError, ProviderUnavailable
+from ..core.errors import DataSourceError, ProviderUnavailable, ValidationError
 from ..data.level2 import (
     capabilities,
     compute_capital_flow,
@@ -26,6 +26,7 @@ from ..data.level2 import (
     orderbook_summary,
     summarize_ticks,
 )
+from ..data import level2_tools as big_orders
 from .common import (
     cached,
     get_data_provider,
@@ -52,6 +53,20 @@ DEFAULT_TICKS_TTL = 10.0
 #: 逐笔契约里的固定口径说明（前端 / MCP 文案共用）
 TICKS_NOTE = ("该接口约覆盖最近 4000 笔（分页拉取）；方向 B/S/M 是第三方「盘口方向标记」，"
               "不是交易所 Level-2 的主动买卖判定，请与外盘 / 内盘交叉参考。")
+
+
+def _normalize_sides(value: Any) -> Optional[List[str]]:
+    """``sides`` → 小写方向列表（``None`` = 买卖都看）。
+
+    HTTP / MCP 边界已经归一化；这里再兜一层，避免调用方传裸字符串 ``"buy"`` 时
+    被 ``set()`` 拆成 ``{"b", "u", "y"}`` 而**静默返回 0 行**（错答案比报错更难发现）。
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = [value]
+    items = [str(item).strip().lower() for item in value]
+    return [item for item in items if item] or None
 
 
 def _append_note(notes: List[str], text: Any) -> None:
@@ -265,6 +280,225 @@ class Level2Service:
         )
         return flow_to_dict(flow)
 
+    # ------------------------------------------------------------------ L2 工具
+
+    def big_orders(self, code: str, threshold: float = 1_000_000.0,
+                   limit: int = 50, sides: Optional[List[str]] = None) -> Dict[str, Any]:
+        """大单追踪：逐笔里单笔金额 ≥ ``threshold`` 的成交（时间倒序）+ 统计。
+
+        阈值常用 100 万（超大单）/ 50 万 / 20 万；``sides`` 传 ``["buy"]`` 只看主动买。
+        """
+        code = self._code(code)
+        try:
+            floor = float(threshold)
+        except (TypeError, ValueError):
+            floor = 1_000_000.0
+        if floor <= 0:
+            floor = 1_000_000.0
+        top = parse_int(limit, "limit", default=50, minimum=1, maximum=200, clamp=True)
+        sides = _normalize_sides(sides)      # 容错：传裸字符串 "buy" 也当作 ["buy"]
+        sample = max(top * 20, DEFAULT_FLOW_LIMIT)
+
+        def load() -> Dict[str, Any]:
+            rows = self._ticks(code, sample)
+            # sides 过滤要同时作用于「列表」与「统计」：否则只看主动买时统计仍含卖出
+            items = big_orders.filter_big_orders(rows, floor, sides=sides, limit=top)
+            summary = big_orders.big_orders_summary(rows, floor, sides=sides)
+            return {
+                "code": code,
+                "name": self._name(code) or "",
+                "threshold": floor,
+                "count": summary["count"],
+                "shown": len(items),
+                "items": items,
+                "summary": summary,
+                "tick_sample": len(rows),
+                "note": "样本 = 拉取到的逐笔（约覆盖最近 4000 笔）；方向为第三方盘口标记。",
+            }
+
+        payload, hit = self._tool_cached("big", [code, floor, top, sides], self.ttl_ticks, load)
+        return self._with_meta(payload, hit, self.ttl_ticks)
+
+    def flow_series(self, code: str, limit: int = DEFAULT_FLOW_LIMIT) -> Dict[str, Any]:
+        """资金流分时序列（逐笔按分钟聚合，含累计净额）+ 四档分档。"""
+        code = self._code(code)
+        sample = parse_int(limit, "limit", default=DEFAULT_FLOW_LIMIT, minimum=1, maximum=MAX_TICKS,
+                           clamp=True)
+
+        def load() -> Dict[str, Any]:
+            rows = self._ticks(code, sample)
+            series = big_orders.minute_flow(rows)
+            flow = flow_to_dict(compute_capital_flow(
+                rows, code=code, name=self._name(code) or "", ts="", source=self._source()))
+            return {
+                "code": code,
+                "name": self._name(code) or "",
+                "minutes": len(series),
+                "tick_sample": len(rows),
+                "series": series,
+                "buckets": flow.get("buckets", {}),
+                "main_net": flow.get("main_net", 0.0),
+                "main_net_pct": flow.get("main_net_pct", 0.0),
+                "amount_total": flow.get("amount_total", 0.0),
+                "note": "每分钟净额 = 该分钟主动买 − 主动卖（第三方方向标记）；累计净额按时间递增。",
+            }
+
+        payload, hit = self._tool_cached("series", [code, sample], self.ttl_ticks, load)
+        return self._with_meta(payload, hit, self.ttl_ticks)
+
+    def seal_status(self, code: str) -> Dict[str, Any]:
+        """封板状态：此刻是否涨停/跌停、封单量与封成比、距涨停幅度。"""
+        code = self._code(code)
+
+        def load() -> Dict[str, Any]:
+            book = self._orderbook(code)
+            quote = self._quote(code)
+            total = 0.0
+            if quote is not None:
+                total = float(getattr(quote, "amount_yi", 0.0) or 0.0) * 1e8
+            seal = big_orders.seal_status(book, amount_total=total, code=code)
+            return {
+                "code": code,
+                "name": (getattr(quote, "name", "") or book.name or self._name(code) or ""),
+                "price": float(getattr(quote, "price", 0.0) or book.price or 0.0),
+                "prev_close": book.prev_close,
+                "seal": seal,
+                "seal_text": "%s（%s）" % (seal["label"], seal["limit_pct_text"]),
+                "note": "只按当前快照判断此刻是否封板；开板次数需要盘中多次采样，不在单次调用里给出。",
+            }
+
+        payload, hit = self._tool_cached("seal", [code], self.ttl_orderbook, load)
+        return self._with_meta(payload, hit, self.ttl_orderbook)
+
+    def scan(self, codes: List[str], limit: int = 10) -> Dict[str, Any]:
+        """盘口异动扫描：多标的快照特征（委比、委差、量比、封板、距涨停），按委比降序。
+
+        标的数量上限 10（每个标的都要取一次快照）；调用方负责把「自选池」解析成 ``codes``。
+        """
+        wanted: List[str] = []
+        invalid: List[str] = []
+        for item in codes or []:
+            try:
+                normalized = self._code(item)
+            except Exception:                     # noqa: BLE001 - 单个非法代码跳过，不拖垮整批
+                invalid.append(str(item))
+                continue
+            if normalized not in wanted:
+                wanted.append(normalized)
+        top = parse_int(limit, "limit", default=10, minimum=1, maximum=10, clamp=True)
+        wanted = wanted[:top]
+        if not wanted:
+            if invalid:
+                raise ValidationError("无法识别的标的代码：%s" % "、".join(invalid[:5]), field="codes")
+            raise self._unsupported("盘口扫描（需要至少一个标的代码）", self.capabilities())
+        items: List[Dict[str, Any]] = []
+        failures: List[Dict[str, str]] = [{"code": item, "error": "无法识别的标的代码"}
+                                          for item in invalid]
+        for code in wanted:
+            try:
+                row = big_orders.scan_book(self._orderbook(code), quote=self._quote(code))
+            except Exception as exc:              # noqa: BLE001 - 逐标的容错
+                failures.append({"code": code, "error": str(exc)})
+                continue
+            if row:
+                items.append(row)
+        items = big_orders.rank_rows(items, key="imbalance_pct", top=None)
+        return self._with_meta({
+            "count": len(items),
+            "requested": len(wanted),
+            "items": items,
+            "failures": failures,
+            "note": "单次快照的静态特征排序；突变检测（挂单骤增/大单撤单）需要两次以上采样，本工具不承诺。",
+        }, False)
+
+    def flow_rank(self, codes: List[str], limit: int = 1000, top: int = 10) -> Dict[str, Any]:
+        """个股资金流排行：批量算主力净额与占比，按主力净额降序（最多 10 只）。"""
+        wanted: List[str] = []
+        invalid: List[str] = []
+        for item in codes or []:
+            try:
+                normalized = self._code(item)
+            except Exception:                     # noqa: BLE001
+                invalid.append(str(item))
+                continue
+            if normalized not in wanted:
+                wanted.append(normalized)
+        top = parse_int(top, "top", default=10, minimum=1, maximum=10, clamp=True)
+        wanted = wanted[:top]
+        if not wanted:
+            if invalid:
+                raise ValidationError("无法识别的标的代码：%s" % "、".join(invalid[:5]), field="codes")
+            raise self._unsupported("资金流排行（需要至少一个标的代码）", self.capabilities())
+        sample = parse_int(limit, "limit", default=1000, minimum=1, maximum=MAX_TICKS, clamp=True)
+        items: List[Dict[str, Any]] = []
+        failures: List[Dict[str, str]] = [{"code": item, "error": "无法识别的标的代码"}
+                                         for item in invalid]
+        for code in wanted:
+            try:
+                rows = self._ticks(code, sample)
+                flow = compute_capital_flow(rows, code=code, name=self._name(code) or "",
+                                            source=self._source())
+            except Exception as exc:              # noqa: BLE001 - 逐标的容错
+                failures.append({"code": code, "error": str(exc)})
+                continue
+            items.append({
+                "code": code,
+                "name": flow.name or self._name(code) or "",
+                "main_net": round(flow.main_net, 2),
+                "main_net_pct": round(flow.main_net_pct, 2),
+                "net_amount": round(flow.net_amount, 2),
+                "buy_amount": round(flow.buy_amount, 2),
+                "sell_amount": round(flow.sell_amount, 2),
+                "amount_total": round(flow.amount_total, 2),
+                "tick_count": flow.tick_count,
+            })
+        return self._with_meta({
+            "count": len(items),
+            "requested": len(wanted),
+            "items": big_orders.rank_rows(items, key="main_net", top=None),
+            "failures": failures,
+            "note": "主力净额 = 超大单 + 大单净额（按单笔成交额分档自算，样本约最近 4000 笔）。",
+        }, False)
+
+    # ------------------------------------------------------------------ L2 工具内部
+
+    def _tool_cached(self, tag: str, key_parts: List[Any], ttl: float, loader) -> Any:
+        key = "level2:%s:%s" % (tag, ":".join(str(part) for part in key_parts))
+        return self._cached(key, ttl, loader)
+
+    def _with_meta(self, payload: Dict[str, Any], cache_hit: bool = False,
+                   ttl: Optional[float] = None) -> Dict[str, Any]:
+        """给工具结果补上统一 ``meta``（含缓存命中说明）与能力协商字段。"""
+        data = dict(payload or {})
+        data["meta"] = self.meta(cache_hit=cache_hit, ttl=ttl)
+        data["capabilities"] = self.capabilities()
+        return data
+    def _ticks(self, code: str, limit: int) -> List[Any]:
+        provider = self.provider
+        if not callable(getattr(provider, "ticks", None)):
+            raise self._unsupported("逐笔成交", self.capabilities())
+        rows = list(provider.ticks(code, limit=limit) or [])
+        if not rows:
+            raise self._no_data(code, "逐笔成交")
+        return rows
+
+    def _orderbook(self, code: str) -> Any:
+        provider = self.provider
+        if not callable(getattr(provider, "orderbook", None)):
+            raise self._unsupported("盘口", self.capabilities())
+        book = provider.orderbook(code)
+        if book is None:
+            raise self._no_data(code, "盘口")
+        return book
+
+    def _quote(self, code: str) -> Any:
+        """便宜地取一份快照（用于成交额/量比/名称）；失败返回 ``None``（不影响主结果）。"""
+        try:
+            rows = self.provider.latest_quotes([code])
+        except Exception:                         # noqa: BLE001
+            return None
+        return rows[0] if rows else None
+
     def _cached(self, key: str, ttl: float, loader) -> Any:
         """进程内短 TTL 缓存，返回 ``(值, 是否命中缓存)``（复用 ``services.common.cached``）。"""
         touched = []
@@ -285,6 +519,10 @@ class Level2Service:
             name = ""
         return str(name or getattr(self.provider, "name", "") or "unknown")
 
+
+    def _code(self, code: str) -> str:
+        """规范化标的代码（非法时抛 ``ValidationError``，由接口层映射 400 / MCP 转 isError）。"""
+        return normalize_code(code)
     def _name(self, code: str) -> str:
         resolver = getattr(self.provider, "resolve_name", None)
         if not callable(resolver):

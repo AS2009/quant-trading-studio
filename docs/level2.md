@@ -96,7 +96,32 @@ GET /api/level2/<code>/flow?limit=2000    # 分档资金流
 | `level2_ticks` | 最近逐笔成交 + 多空统计（默认 60 条，文本里注明覆盖上限与方向口径） |
 | `capital_flow` | 四档资金流与主力净额（自算口径） |
 
----
+### 3.4 L2 工具箱（桌面 / Web 同一套，共 5 个）
+
+| 工具 | 作用 | 关键口径 |
+|---|---|---|
+| **大单追踪** | 逐笔里**单笔金额 ≥ 阈值**（20 万 / 50 万 / 100 万 / 200 万，默认 100 万）的成交，时间倒序，附笔数、买卖额、净额、占样本成交额比、最大单笔 | 阈值即分档线（≥100 万 = 超大单）；样本约最近 4000 笔 |
+| **资金流分时** | 逐笔按**分钟**聚合：每分钟主动买/卖/净额 + **累计净额曲线**，以及四档分档净额 | 方向取第三方盘口标记；累计净额 = 各分钟净额累加 |
+| **封板状态** | 此刻是否涨停/跌停、涨停价、距涨停 %、**封单量/封单额/封成比** | 涨跌停幅度按板块推断（主板 10% / 创业板·科创板 20% / 北交所 30%；**ST 为 5%，需自行核对**）；只按当前快照判断，**不给开板次数** |
+| **盘口异动扫描** | 对一组标的（缺省=自选池，最多 10 只）取快照，按**委比**降序给出涨跌幅、委买委卖量、比值、量比、封板与距涨停 | 单次快照的静态特征；「挂单骤增 / 大单撤单」这类**突变检测需要两次以上采样**，不承诺 |
+| **资金流排行** | 对一组标的（缺省=自选池，最多 10 只）算主力净额与占比，按主力净额降序 | 每只要拉一次逐笔，**约 10–25 秒/只**；主力净额 = 超大单 + 大单 |
+
+**对应的 HTTP 接口**（Web / 脚本可直接用）：
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/level2/<code>/big-orders?threshold=1000000&limit=50` | 大单追踪（可选 `sides=buy` / `sides=sell`） |
+| `GET /api/level2/<code>/flow-series?limit=2000` | 资金流分时序列 |
+| `GET /api/level2/<code>/seal` | 封板状态 |
+| `GET /api/level2/scan?codes=A,B,C&limit=10` | 盘口异动扫描（`codes` 缺省=自选池） |
+| `GET /api/level2/flow-rank?codes=A,B,C&top=10&limit=1000` | 资金流排行（`codes` 缺省=自选池） |
+
+**对应的 MCP 工具**：`l2_big_orders`、`l2_flow_series`、`l2_seal_status`、`l2_scan`、`l2_flow_rank`
+（`structuredContent` 返回上面的完整结构；文本只给精简摘要，避免灌满上下文）。
+
+> **耗时提示**：大单 / 分时约 3–10 秒；扫描约 1 秒/只；排行约 10–25 秒/只（10 只时可能 2–4 分钟）。
+> 界面上这四个工具都走后台任务并有「进行中」提示，**不参与 3 秒自动刷新**（自动刷新只覆盖盘口/逐笔）。
+
 
 ## 4. 接入真正的 Level-2（你有付费权限时）
 
@@ -183,12 +208,13 @@ time,price,volume,amount,side
 |---|---|
 | `backend/quantstudio/core/models.py` | `OrderBookLevel` / `OrderBook` / `Tick` / `CapitalFlow` |
 | `backend/quantstudio/data/level2.py` | 解析与口径纯函数（分档、委比、资金流、能力协商） |
+| `backend/quantstudio/data/level2_tools.py` | **L2 工具口径**（大单、封单/涨跌停、资金流分时、扫描、排行；纯函数） |
 | `backend/quantstudio/data/tencent.py` `sina.py` `ths.py` | 免费源实现（盘口 / 逐笔 / 快照） |
 | `backend/quantstudio/data/composite.py` | 降级链：腾讯 → 新浪 → …；逐笔只有腾讯有方向 |
 | `backend/quantstudio/data/level2_import.py` | 本地导入通道（§4.2 的两种 CSV） |
 | `backend/quantstudio/services/level2_service.py` | 服务层（缓存 + JSON 契约） |
 | `backend/quantstudio/mcp/tools_level2.py` | MCP 三个工具 |
-| `desktop/quantstudio_desktop/views/level2.py`、`frontend/js/views/level2.js` | 两处界面 |
+| `desktop/quantstudio_desktop/views/level2.py`、`frontend/js/views/level2.js` | 两处界面（盘口 + 5 个 L2 工具） |
 
-测试：`backend/tests/test_level2.py`（口径手算对照）、`test_data_providers.py`（解析与降级）、
+测试：`backend/tests/test_level2.py` / `test_level2_tools.py`（口径手算对照）、`test_data_providers.py`（解析与降级）、
 `test_level2_import.py`（导入）、`test_mcp_tools_level2.py`（工具）、`desktop/tests/test_views_level2.py`（页面）。
