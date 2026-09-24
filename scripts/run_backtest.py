@@ -6,6 +6,8 @@
     python scripts/run_backtest.py --strategy st_ma_cross --symbols 600519.SH --start 2023-01-01 --end 2026-09-18
     python scripts/run_backtest.py --strategy st_momentum --symbols 600519.SH,300750.SZ,002594.SZ \
         --out /tmp/bt.json --csv /tmp/bt_nav.csv --cash 500000 --benchmark 000300.SH
+    python scripts/run_backtest.py --strategy st_macd_adx --symbols 600519.SH \
+        --flow-fee 1 --slippage-ticks 2 --commission-min 5 --lot-size 100   # 自定义费用口径
 """
 
 import argparse
@@ -37,6 +39,12 @@ def parse_args():
     p.add_argument("--adjust", default="qfq", choices=["qfq", "hfq", "none"], help="复权方式")
     p.add_argument("--slippage-bps", type=float, default=2.0, help="滑点（基点）")
     p.add_argument("--commission-rate", type=float, default=0.00025, help="佣金费率（双边）")
+    p.add_argument("--commission-min", type=float, default=5.0, help="单笔最低佣金（元）")
+    p.add_argument("--flow-fee", type=float, default=0.0, help="每笔固定流量费（元，买卖各收一次）")
+    p.add_argument("--slippage-ticks", type=float, default=0.0,
+                   help="跳数滑点（最小变动价位的跳数，与 --slippage-bps 叠加）")
+    p.add_argument("--tick-size", type=float, default=0.01, help="最小变动价位（元，跳数滑点用）")
+    p.add_argument("--lot-size", type=int, default=100, help="最小交易单位（股）")
     p.add_argument("--param", action="append", default=[], help="策略参数覆盖，形如 --param short_ma=10")
     p.add_argument("--out", default="", help="结果 JSON 输出路径")
     p.add_argument("--csv", default="", help="净值 CSV 输出路径")
@@ -75,7 +83,10 @@ def main():
         end=args.end,
         initial_cash=args.cash if args.cash is not None else settings.initial_cash,
         benchmark=args.benchmark or settings.benchmark,
-        fee=FeeConfig(commission_rate=args.commission_rate, slippage_bps=args.slippage_bps),
+        fee=FeeConfig(commission_rate=args.commission_rate, commission_min=args.commission_min,
+                      flow_fee=args.flow_fee, slippage_bps=args.slippage_bps,
+                      slippage_ticks=args.slippage_ticks, tick_size=args.tick_size,
+                      lot_size=args.lot_size),
         params_override=params,
     )
 
