@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import unittest
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -184,10 +185,30 @@ class TestLocalDiscovery(LocalFixtureMixin):
     def test_id_conflict_with_builtin_is_reported(self):
         self.write_local("shadow", fixture_source(slug="shadow", strategy_id="st_ma_cross",
                                                   class_name="ShadowStrategy", name="冒名策略"))
-        discover_local(force=True)
-        status = local_status()
-        self.assertTrue(any("冲突" in item["error"] for item in status["errors"]))
+        status = self._status_with_conflict_retry()
+        self.assertTrue(any("冲突" in item["error"] for item in status["errors"]),
+                        "未检测到 id 冲突。local_status()=%r；扫描目录=%s；目录内容=%s"
+                        % (status, LOCAL_DIR,
+                           sorted(os.listdir(LOCAL_DIR)) if os.path.isdir(LOCAL_DIR) else None))
         self.assertEqual(REGISTRY["st_ma_cross"].__name__, "MaCrossStrategy", "内置策略不能被本地文件顶替")
+
+    def _status_with_conflict_retry(self, attempts: int = 3):
+        """发现冲突；失败时重试几次。
+
+        Windows CI 上刚写入的 .py 可能被 Defender 之类的安全软件瞬时占用，
+        `importlib` 读取会抛 PermissionError，被 ``discover_local`` 记成「导入失败」
+        而不是「id 冲突」，于是这个断言偶发失败（Linux/macOS 上从未出现）。
+        重试几次即可区分「瞬时占用」与「真的没检测到冲突」——后者会把完整诊断打出来。
+        """
+        status = {"errors": []}
+        for attempt in range(attempts):
+            discover_local(force=True)
+            status = local_status()
+            if any("冲突" in item["error"] for item in status["errors"]):
+                return status
+            if attempt + 1 < attempts:
+                time.sleep(0.5 * (attempt + 1))
+        return status
 
 
 class TestLintRules(LocalFixtureMixin):
