@@ -190,7 +190,7 @@ git tag v1.0.0 && git push origin v1.0.0
 * **无控制台保护**：`boot.ensure_stdio()` 把 `None` 的 stdout/stderr 指向 `os.devnull`，避免 `print()` 崩窗口。
 * **图标**：`desktop/build/icon.ico`（16/24/32/48/64/128/256 七种尺寸）由
   `python desktop/build/make_icon.py` **纯标准库**生成（不依赖 Pillow），配色取自 `theme.COLORS`。
-* **体积（CI 实测，v1.3.0）**：目录版 zip **14.1 MB**、单文件 exe **14.1 MB**（Python 3.12 / windows-latest）；
+* **体积（CI 实测，v1.4.0）**：目录版 zip **14.2 MB**、单文件 exe **14.1 MB**（Python 3.12 / windows-latest）；
   本机 macOS 打包是 11 MB / 4.4 MB。已 `excludes` 掉 flask/jinja2/pytest/numpy/pandas/matplotlib。
 * PyInstaller 引导器**可能被个别杀软误报**，正式分发建议对 exe 做代码签名，或优先分发 onedir 目录版。
 
