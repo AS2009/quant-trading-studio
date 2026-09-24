@@ -35,6 +35,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..core.errors import ValidationError
 from ..core.models import Bar, OrderRequest, Position
+from .. import console
 
 # --------------------------------------------------------------------------- 规范常量（与 docs/strategy-spec.md 保持一致）
 ID_RE = re.compile(r"^st_[a-z0-9_]{2,36}$")
@@ -660,6 +661,7 @@ def _print_text(report: Dict[str, Any]) -> None:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    console.force_utf8_output()             # Windows 控制台非 UTF-8 时，打印中文不再崩
     parser = argparse.ArgumentParser(prog="python -m quantstudio.strategies.lint",
                                      description="策略规范校验（源码 + 运行期 + 烟雾回测）")
     parser.add_argument("--path", action="append", default=[], help="校验单个策略文件（可多次指定）")

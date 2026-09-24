@@ -23,6 +23,7 @@ from quantstudio.core.calendar import TradingCalendar  # noqa: E402
 from quantstudio.core.models import BacktestRequest, FeeConfig  # noqa: E402
 from quantstudio.data import get_provider  # noqa: E402
 from quantstudio.strategies import create, list_specs  # noqa: E402
+from quantstudio import console  # noqa: E402
 
 
 def parse_args():
@@ -44,6 +45,7 @@ def parse_args():
 
 
 def main():
+    console.force_utf8_output()             # Windows 控制台非 UTF-8 时，打印中文不再崩
     args = parse_args()
     specs = list_specs()
     if args.list:

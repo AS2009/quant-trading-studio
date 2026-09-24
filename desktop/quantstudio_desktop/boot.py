@@ -77,22 +77,36 @@ def ensure_data_dir() -> str:
 
 
 def ensure_stdio() -> None:
-    """保证 ``sys.stdout/stderr`` 可用。
+    """保证 ``sys.stdout/stderr`` 可用，并且能在非 UTF-8 控制台下打印中文。
 
-    PyInstaller 的 ``--windowed``（无控制台）构建下，这两个流可能是 ``None``，
-    任何 ``print()`` 都会抛 ``AttributeError``；这里兜底指向 ``os.devnull``。
+    * PyInstaller ``--windowed``（无控制台）构建下这两个流可能是 ``None``，任何
+      ``print()`` 都会抛 ``AttributeError`` —— 兜底指向 ``os.devnull``；
+    * Windows 的控制台/管道代码页常常不是 UTF-8（cp1252 / cp936），``print("中文")``
+      会抛 ``UnicodeEncodeError``；这里统一切到 UTF-8 且 ``errors="replace"``，
+      保证「打印」永远不会打断界面线程。
     """
-    missing = sys.stdout is None or sys.stderr is None
-    if not missing:
-        return
-    try:
-        devnull = open(os.devnull, "w", encoding="utf-8")
-    except OSError:
-        return
-    if sys.stdout is None:
-        sys.stdout = devnull
-    if sys.stderr is None:
-        sys.stderr = devnull
+    if sys.stdout is None or sys.stderr is None:
+        try:
+            devnull = open(os.devnull, "w", encoding="utf-8")
+        except OSError:
+            devnull = None
+        if devnull is not None:
+            if sys.stdout is None:
+                sys.stdout = devnull
+            if sys.stderr is None:
+                sys.stderr = devnull
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        encoding = (getattr(stream, "encoding", "") or "").lower().replace("-", "").replace("_", "")
+        if encoding in ("utf8", "utf8mb4", "cp65001"):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 - 被包装/重定向的流可能不支持
+            pass
 
 
 def prepare() -> dict:

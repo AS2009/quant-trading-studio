@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.join(ROOT, "backend"))
 
 from quantstudio.config import get_settings  # noqa: E402
 from quantstudio.data import get_provider  # noqa: E402
+from quantstudio import console  # noqa: E402
 
 
 def read_watchlist(settings):
@@ -35,6 +36,7 @@ def read_watchlist(settings):
 
 
 def main():
+    console.force_utf8_output()             # Windows 控制台非 UTF-8 时，打印中文不再崩
     parser = argparse.ArgumentParser(description="行情数据预热 / 导出")
     parser.add_argument("--symbols", default="", help="标的，逗号分隔（默认自选池）")
     parser.add_argument("--days", type=int, default=250, help="K 线天数")

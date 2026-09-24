@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(ROOT, "backend"))
 
 from quantstudio import __version__, compat  # noqa: E402
 from quantstudio.config import get_settings  # noqa: E402
+from quantstudio import console  # noqa: E402
 
 
 def line(title):
@@ -24,6 +25,7 @@ def line(title):
 
 
 def main():
+    console.force_utf8_output()             # Windows 控制台非 UTF-8 时，打印中文不再崩
     settings = get_settings()
     line("QuantTrading Studio 环境自检  v%s" % __version__)
     print("Python      :", sys.version.split()[0])

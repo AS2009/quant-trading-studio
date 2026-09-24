@@ -51,6 +51,13 @@ jobs:
     name: Windows 打包与产物自检
     needs: test
     runs-on: windows-latest
+    # 编码兜底：Windows 控制台/管道默认代码页不是 UTF-8，Python 打印中文会抛
+    # UnicodeEncodeError（实测让「策略规范校验」整步失败）。这两个变量让所有
+    # Python 子进程（含 PyInstaller 产出的 exe）都用 UTF-8 读写标准流。
+    # 代码层另有 quantstudio.console.force_utf8_output() 做同样的事，双保险。
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: '1'
     steps:
       - uses: actions/checkout@v4
 
