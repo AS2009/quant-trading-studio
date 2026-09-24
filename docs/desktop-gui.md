@@ -168,12 +168,19 @@ python -m quantstudio_desktop --view market    :: 指定启动页（market/strat
 
 ## 6. GitHub Actions 自动编译
 
-仓库里有两个工作流，推送到 GitHub 后自动生效：
+仓库里有三个工作流，推送到 GitHub 后自动生效：
 
 | 工作流 | 触发 | 做什么 |
 |---|---|---|
 | `.github/workflows/test.yml` | push / PR | Linux 上跑核心测试（3.9/3.11/3.12）+ 策略规范校验 + `compileall`；另有 xvfb 下的桌面测试与 GUI 自检（不阻塞） |
-| `.github/workflows/build-desktop.yml` | push 到 main/master、打 `v*` 标签、PR、手动触发 | 先跑核心测试与**桌面测试（142 项）** → 在 **windows-latest** 用 PyInstaller 打包 onedir + onefile → **对产物跑真实自检** → 上传制品 → 打标签时发布 Release |
+| `.github/workflows/build-desktop.yml` | push 到 main/master、打 `v*` 标签、PR、手动触发 | 先跑核心测试与**桌面测试（161 项）** → 在 **windows-latest** 用 PyInstaller 打包 onedir + onefile → **对产物跑真实自检** → 上传制品 → 打标签时发布 Release |
+| `.github/workflows/build-macos.yml` | 手动触发、打 `v*` 标签 | 在 **macos-14** 上跑 `desktop/build/build_macos.sh`：构建 universal2 `.app` → ad-hoc 签名 → 校验 `Info.plist`/架构/dmg 可挂载 → 上传制品；打标签时用 `gh release upload` 把 zip/dmg **附加**到 Release（不覆盖正文） |
+
+关于 macOS 工作流的一个坑：GitHub 的 macOS runner 偶发「镜像用户态比内核新」，导致**系统 Tk 8.5 无法加载**
+（日志里是 `macOS 14 (1408) or later required, have instead 14 (1406)` → `Abort trap: 6`）。
+所以工作流会先探测 `tkinter.Tk()` 能否创建窗口：能就全跑自检，不能就自动加 `--skip-tests`，
+只验证「能构建 + 包结构正确」，并用 `::warning::` 说明——**这是 runner 环境问题，不是产物问题**；
+运行期验证以本机（真实 macOS）为准，见上面的「方式 D」。
 
 ### 取回编译结果
 

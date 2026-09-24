@@ -146,7 +146,7 @@ else
     sed 's/^/  /' "${REPORT_FILE}"
     echo "  ---- 报告结束 ----"
   fi
-  [ "${CODE_SELF}" -eq 0 ] || die "产物 --selftest 失败（exit=${CODE_SELF}）"
+  [ "${CODE_SELF}" -eq 0 ] || die "产物 --selftest 失败（exit=${CODE_SELF}）：若这台机器报 'macOS 1x (…1408) or later required, have instead …'，说明它的系统 Tk 无法加载（常见于 CI runner / VM 的镜像与内核版本不一致），加 --skip-tests 只做构建与结构校验"
 
   set +e
   MCP_OUT="$("${EXE}" --mcp --selftest 2>&1)"
