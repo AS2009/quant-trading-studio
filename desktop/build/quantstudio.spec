@@ -102,6 +102,12 @@ _DESKTOP_HIDDEN = [
     "quantstudio.mcp.tools_strategy",
     "quantstudio.mcp.tools_backtest",
     "quantstudio.mcp.tools_portfolio",
+    "quantstudio.mcp.tools_level2",
+    # 盘口 / L2 的数据源与服务层（静态导入本可被分析到，显式列出以防重构后漏掉）
+    "quantstudio.data.level2",
+    "quantstudio.data.level2_import",
+    "quantstudio.data.ths",
+    "quantstudio.services.level2_service",
     "quantstudio.mcp.resources",
     "quantstudio.mcp.prompts",
 ]

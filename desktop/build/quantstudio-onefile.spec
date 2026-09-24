@@ -103,6 +103,11 @@ quantstudio.mcp.tools_market
 quantstudio.mcp.tools_strategy
 quantstudio.mcp.tools_backtest
 quantstudio.mcp.tools_portfolio
+quantstudio.mcp.tools_level2
+quantstudio.data.level2
+quantstudio.data.level2_import
+quantstudio.data.ths
+quantstudio.services.level2_service
 quantstudio.mcp.resources
 quantstudio.mcp.prompts
 """.split()
