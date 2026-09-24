@@ -79,11 +79,15 @@ jobs:
       - name: 校验 dmg 可挂载且内含 .app
         run: |
           DMG="desktop/build/output-macos/pkg/QuantTradingStudio-macos-universal2.dmg"
-          MOUNT="$(hdiutil attach -nobrowse -readonly "$DMG" | tail -1 | awk '{print $3}')"
-          echo "挂载点：${MOUNT}"
-          ls -la "${MOUNT}"
-          test -x "${MOUNT}/QuantTradingStudio.app/Contents/MacOS/QuantTradingStudio"
-          hdiutil detach "${MOUNT}"
+          # 用显式挂载点：卷名里带空格（"QuantTrading Studio"），解析 hdiutil 输出容易截断
+          MOUNT="${RUNNER_TEMP:-/tmp}/quantstudio-dmg"
+          mkdir -p "$MOUNT"
+          hdiutil attach -nobrowse -readonly -mountpoint "$MOUNT" "$DMG"
+          ls -la "$MOUNT"
+          test -x "$MOUNT/QuantTradingStudio.app/Contents/MacOS/QuantTradingStudio"
+          "$MOUNT/QuantTradingStudio.app/Contents/MacOS/QuantTradingStudio" --help | head -5 \
+            || echo "[警告] 产物 --help 没跑通（runner 的 Tk 限制，不影响包结构结论）"
+          hdiutil detach "$MOUNT"
 
       - uses: actions/upload-artifact@v4
         with:
