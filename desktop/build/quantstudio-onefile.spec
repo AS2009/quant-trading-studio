@@ -67,6 +67,7 @@ quantstudio_desktop.views.strategies
 quantstudio_desktop.views.backtest
 quantstudio_desktop.views.portfolio
 quantstudio_desktop.views.trade
+quantstudio_desktop.views.level2
 """.split()
 
 # GUI 用到的标准库模块

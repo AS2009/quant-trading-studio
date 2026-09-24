@@ -15,11 +15,13 @@ from ..config import Settings, get_settings
 from ..core.models import DataMeta
 from .backtest_service import BacktestService
 from .common import provider_meta
+from .level2_service import Level2Service
 from .market_service import MarketService
 from .portfolio_service import PortfolioService
 from .strategy_service import StrategyService
 
-__all__ = ["Services", "get_services", "MarketService", "StrategyService", "BacktestService", "PortfolioService"]
+__all__ = ["Services", "get_services", "MarketService", "Level2Service", "StrategyService",
+           "BacktestService", "PortfolioService"]
 
 
 class Services:
@@ -37,6 +39,7 @@ class Services:
     ):
         self.settings = settings or get_settings()
         self.market = MarketService(provider=provider, settings=self.settings)
+        self.level2 = Level2Service(provider=provider, settings=self.settings)
         self.strategies = StrategyService(
             settings=self.settings,
             strategies_module=strategies_module,

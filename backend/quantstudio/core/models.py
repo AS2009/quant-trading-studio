@@ -72,6 +72,82 @@ class Quote:
         return asdict(self)
 
 
+# --------------------------------------------------------------------------- 盘口 / 逐笔 / 资金流
+
+
+@dataclass
+class OrderBookLevel:
+    """盘口一档（价格 + 挂单量）。"""
+
+    price: float = 0.0
+    volume: int = 0                # 手
+    amount: float = 0.0            # 元（源未给则按 价格 × 手数 × 100 估算）
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class OrderBook:
+    """盘口快照：免费源 5 档，付费 Level-2 源（或本地导入）可为 10 档。
+
+    ``bids`` 从买一往外交替降序、``asks`` 从卖一往外交替升序；``levels`` 是本快照实际档数。
+    ``outer_volume`` / ``inner_volume`` 为外盘（主动买）/ 内盘（主动卖）手数，源未给出时为 0。
+    """
+
+    code: str
+    name: str = ""
+    price: float = 0.0
+    prev_close: float = 0.0
+    ts: str = ""
+    source: str = ""
+    levels: int = 5
+    bids: List[OrderBookLevel] = field(default_factory=list)
+    asks: List[OrderBookLevel] = field(default_factory=list)
+    outer_volume: int = 0
+    inner_volume: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class Tick:
+    """逐笔成交（第三方公开源口径，**不是**交易所 Level-2 逐笔）。"""
+
+    time: str = ""                 # HH:MM:SS
+    price: float = 0.0
+    volume: int = 0                # 手
+    amount: float = 0.0            # 元
+    side: str = "neutral"          # buy / sell / neutral：第三方「盘口方向标记」
+    change: float = 0.0            # 相对上一笔的涨跌额
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class CapitalFlow:
+    """按**单笔成交额分档**自算的资金流（口径见 ``data/level2.py``）。"""
+
+    code: str
+    name: str = ""
+    ts: str = ""
+    source: str = ""
+    amount_total: float = 0.0      # 样本成交额（元）
+    buy_amount: float = 0.0
+    sell_amount: float = 0.0
+    net_amount: float = 0.0        # buy - sell
+    main_net: float = 0.0          # 超大单 + 大单 净额
+    main_net_pct: float = 0.0      # main_net / amount_total × 100
+    net_pct: float = 0.0           # net_amount / amount_total × 100
+    buckets: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    tick_count: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
 @dataclass
 class IndexQuote:
     """指数快照。"""

@@ -12,6 +12,10 @@
 字段位置：0 名称 / 1 今开 / 2 昨收 / 3 最新 / 4 最高 / 5 最低 / 6 买一价 / 7 卖一价 /
 8 成交量 / 9 成交额 / … / 30 日期 / 31 时间。
 
+五档盘口（``orderbook``）用同一个 ``list=`` 接口，解析见 ``data/level2.py`` 的
+:func:`parse_sina_orderbook`：档位数量单位是 **股**（腾讯是手），解析时统一换算成手，
+金额按股数如实计算。
+
 成交量单位（已实测对齐东方财富 f5）
 -----------------------------------
 - 个股 / ETF：**股** → ``volume_wan = 股 / 100 / 1e4``
@@ -36,7 +40,8 @@ from ..core.errors import (
     ProviderUnavailable,
     SymbolNotFound,
 )
-from ..core.models import IndexQuote, Quote
+from ..core.models import IndexQuote, OrderBook, Quote
+from . import level2
 from . import symbols as sym
 from .base import BaseHTTPProvider
 
@@ -57,6 +62,8 @@ class SinaProvider(BaseHTTPProvider):
     QUOTE_URL = "https://hq.sinajs.cn/list="
     #: 单次请求最大标的数（过大容易被拒答）
     BATCH_SIZE = 60
+    #: 免费源盘口固定 5 档（十档需付费 Level-2，见 ``data/level2.py``）
+    ORDERBOOK_LEVELS = 5
 
     def __init__(self, settings=None):
         BaseHTTPProvider.__init__(self, settings)
@@ -145,6 +152,28 @@ class SinaProvider(BaseHTTPProvider):
         if not out:
             raise DataSourceError("新浪未返回任何指数快照")
         return out
+
+    def orderbook(self, code: str) -> OrderBook:
+        """五档盘口（``hq.sinajs.cn/list=``，GBK，需 Referer）。
+
+        档位数量单位是**股**，解析时统一换算成手（见 ``data/level2.py``）；
+        解析失败 / 空响应 / 请求失败时抛 :class:`ProviderUnavailable`，由 Composite 降级。
+        """
+        try:
+            norm = sym.normalize(code)
+        except SymbolNotFound as exc:
+            raise SymbolNotFound("新浪无法识别标的 %r：%s" % (code, exc))
+        url = self.QUOTE_URL + self._code_to_sina(norm)
+        try:
+            text = self._get_text(url, referer=self.referer, encoding="gbk")
+        except DataSourceError as exc:
+            raise ProviderUnavailable("新浪盘口请求失败（%s）：%s" % (norm, exc))
+        book = level2.parse_sina_orderbook(text, code=norm)
+        if book is None:
+            raise ProviderUnavailable("新浪未返回 %s 的五档盘口" % norm)
+        if book.name:
+            self.remember_name(norm, book.name)
+        return book
 
     def _to_quote(self, code: str, fields: List[str]) -> Optional[Quote]:
         price = self._f(fields, 3)

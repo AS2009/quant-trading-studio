@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""行情 / 自选池接口（``/api/market/*``、``/api/watchlist``）。"""
+"""行情 / 自选池 / 盘口（Level2）接口（``/api/market/*``、``/api/watchlist``、``/api/level2/*``）。"""
 
 from flask import Blueprint, current_app, jsonify, request
 
 from ..core.errors import ValidationError
 from ..services.common import envelope, normalize_codes, parse_adjust, parse_freq, parse_int
+from ..services.level2_service import DEFAULT_FLOW_LIMIT, DEFAULT_TICKS_LIMIT, MAX_TICKS
 from .errors import json_body
 
 bp = Blueprint("market", __name__, url_prefix="/api")
@@ -18,6 +19,15 @@ def _envelope(data):
     services = _services()
     return jsonify(
         envelope(data, settings=services.settings, meta=services.market.meta())
+    )
+
+
+def _level2_envelope(data):
+    """Level2 接口信封：meta 直接用服务层产物（含命中缓存的注明）。"""
+    services = _services()
+    meta = dict(data.get("meta") or {}) if isinstance(data, dict) else None
+    return jsonify(
+        envelope(data, settings=services.settings, meta=meta or services.level2.meta())
     )
 
 
@@ -86,3 +96,36 @@ def watchlist_add():
 def watchlist_remove(code):
     codes = _services().market.remove_from_watchlist(code)
     return _envelope({"codes": codes})
+
+
+@bp.route("/level2/<code>/orderbook")
+def level2_orderbook(code):
+    return _level2_envelope(_services().level2.orderbook(code))
+
+
+@bp.route("/level2/<code>/ticks")
+def level2_ticks(code):
+    services = _services()
+    limit = parse_int(
+        request.args.get("limit"),
+        "limit",
+        default=DEFAULT_TICKS_LIMIT,
+        minimum=1,
+        maximum=MAX_TICKS,
+        clamp=True,
+    )
+    return _level2_envelope(services.level2.ticks(code, limit=limit))
+
+
+@bp.route("/level2/<code>/flow")
+def level2_capital_flow(code):
+    services = _services()
+    limit = parse_int(
+        request.args.get("limit"),
+        "limit",
+        default=DEFAULT_FLOW_LIMIT,
+        minimum=1,
+        maximum=MAX_TICKS,
+        clamp=True,
+    )
+    return _level2_envelope(services.level2.capital_flow(code, limit=limit))

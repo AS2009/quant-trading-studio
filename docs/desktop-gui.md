@@ -63,6 +63,7 @@ macOS / Linux 上等价脚本是 `desktop/build/build_unix.sh`（用于本地验
 │ 回测分析  │                                                          │
 │ 持仓管理  │                                                          │
 │ 交易(模拟)│                                                          │
+│ 盘口/L2   │                                                          │
 ├───────────┴──────────────────────────────────────────────────────────┤
 │ 就绪   ⏳                                   2026-09-22 12:31:05      │  ← 状态栏 + 时钟
 └──────────────────────────────────────────────────────────────────────┘
@@ -77,20 +78,20 @@ macOS / Linux 上等价脚本是 `desktop/build/build_unix.sh`（用于本地验
 | 快捷键 | 作用 |
 |---|---|
 | `Ctrl+R` / `F5` | 刷新当前页（重新拉数据） |
-| `Ctrl+1` … `Ctrl+5` | 依次切换到 行情 / 策略 / 回测 / 持仓 / 交易 |
+| `Ctrl+1` … `Ctrl+6` | 依次切换到 行情 / 策略 / 回测 / 持仓 / 交易 / 盘口 / L2 |
 | `Ctrl+Q` | 退出 |
 | `Esc` | 关闭弹窗 / 取消表单 |
 
 ### 菜单
 
 * **文件**：刷新当前页、刷新数据源状态、打开数据目录、打开文档目录、退出
-* **视图**：五个页面（与左侧导航一致）
+* **视图**：六个页面（与左侧导航一致）
 * **工具**：数据源自检…（当场探测各数据源连通性）、清空回测缓存、重置模拟盘账户…
 * **帮助**：关于（版本/数据目录）、如何编写策略（打开 `docs/strategy-spec.md`）
 
 ---
 
-## 3. 五个页面能做什么
+## 3. 六个页面能做什么
 
 | 页面 | 主要内容 | 典型操作 |
 |---|---|---|
@@ -99,6 +100,7 @@ macOS / Linux 上等价脚本是 `desktop/build/build_unix.sh`（用于本地验
 | **回测分析** | 参数区（策略、标的池、区间、初始资金、基准、费用与滑点：佣金率/单笔最低佣金/流量费、比例滑点 + 跳数滑点）、净值 vs 基准、回撤曲线、月度收益、绩效指标、成交流水、期末持仓 | 选好参数点「开始回测」；在成交流水里核对每笔买卖与费用 |
 | **持仓管理** | 录入真实持仓（代码/数量/成本/可用数量/现金），实时估值、盈亏、行业与单票占比、权益曲线 | 「新增/编辑/删除持仓」；「保存快照」把当日权益写进曲线 |
 | **交易（模拟盘）** | 模拟账户资产、下单（买/卖、价格、数量）、订单列表（撤单）、成交流水、当前持仓 | 按实时价模拟成交（T+1、手续费、涨跌停约束），全部本地记账 |
+| **盘口 / L2** | 五档盘口（卖 5→卖 1→买 1→买 5，卖绿买红）、逐笔成交（时间/价格/手数/金额/方向，最多 60 行）、资金流分档（超大单/大单/中单/小单净额与买入占比 + 主力净额与占比）、指标卡（现价/涨跌幅/委比/委差/外盘/内盘） | 输入代码点「查询」（`Ctrl+6` 直达）；需要盯盘时勾「自动刷新（3 秒）」；页面顶部灰字标注数据边界：五档是公开源**快照**、逐笔方向是**第三方盘口标记**（非交易所 Level-2），十档/逐笔委托/委托队列需付费授权 |
 
 数据落地在本地文件（`portfolio.json`、`orders.json`、`fills.json` 等），可随时用**文件 → 打开数据目录**查看或备份。
 
@@ -127,7 +129,7 @@ python -m quantstudio_desktop --help          :: 参数说明
 python -m quantstudio_desktop --version
 python -m quantstudio_desktop --selftest      :: 无界面自检：数据源 → 策略 → 回测 → 报告
 python -m quantstudio_desktop --selftest-gui  :: 构建整个窗口与所有页面后销毁（CI 用）
-python -m quantstudio_desktop --view market   :: 指定启动页（market/strategies/backtest/portfolio/trade）
+python -m quantstudio_desktop --view market    :: 指定启动页（market/strategies/backtest/portfolio/trade/level2）
 ```
 
 `--selftest` / `--selftest-gui` **退出码 0 表示通过、1 表示失败**，并会把完整输出写到：
@@ -147,7 +149,7 @@ python -m quantstudio_desktop --view market   :: 指定启动页（market/strate
 | 工作流 | 触发 | 做什么 |
 |---|---|---|
 | `.github/workflows/test.yml` | push / PR | Linux 上跑核心测试（3.9/3.11/3.12）+ 策略规范校验 + `compileall`；另有 xvfb 下的桌面测试与 GUI 自检（不阻塞） |
-| `.github/workflows/build-desktop.yml` | push 到 main/master、打 `v*` 标签、PR、手动触发 | 先跑核心测试与**桌面测试（121 项）** → 在 **windows-latest** 用 PyInstaller 打包 onedir + onefile → **对产物跑真实自检** → 上传制品 → 打标签时发布 Release |
+| `.github/workflows/build-desktop.yml` | push 到 main/master、打 `v*` 标签、PR、手动触发 | 先跑核心测试与**桌面测试（142 项）** → 在 **windows-latest** 用 PyInstaller 打包 onedir + onefile → **对产物跑真实自检** → 上传制品 → 打标签时发布 Release |
 
 ### 取回编译结果
 
@@ -168,7 +170,7 @@ git tag v1.0.0 && git push origin v1.0.0
 编译完成后 CI 会**真正运行 exe**（`Start-Process -Wait` 读退出码）：
 
 1. `QuantTradingStudio.exe --selftest` → 必须 exit 0（数据源、策略库、回测引擎在打包环境可用）；
-2. `QuantTradingStudio.exe --selftest-gui` → 必须 exit 0（窗口与五个页面能构建，证明 tkinter/tcl 被正确打包）；
+2. `QuantTradingStudio.exe --selftest-gui` → 必须 exit 0（窗口与六个页面能构建，证明 tkinter/tcl 被正确打包）；
 3. 单文件版 `--selftest` → 必须 exit 0；
 4. 打印 `%TEMP%\quantstudio_selftest.txt` 内容便于排查。
 

@@ -20,6 +20,7 @@ VIEW_SPECS: List[Tuple[str, str, str, str]] = [
     ("backtest", "回测分析", "quantstudio_desktop.views.backtest", "BacktestView"),
     ("portfolio", "持仓管理", "quantstudio_desktop.views.portfolio", "PortfolioView"),
     ("trade", "交易（模拟盘）", "quantstudio_desktop.views.trade", "TradeView"),
+    ("level2", "盘口 / L2", "quantstudio_desktop.views.level2", "Level2View"),
 ]
 
 

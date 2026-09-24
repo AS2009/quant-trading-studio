@@ -36,8 +36,11 @@ from quantstudio.core.models import (                                   # noqa: 
     Bar,
     IndexQuote,
     MarketBreadth,
+    OrderBook,
+    OrderBookLevel,
     Quote,
     SectorQuote,
+    Tick,
 )
 from quantstudio.data import (                                          # noqa: E402
     build_provider,
@@ -45,6 +48,7 @@ from quantstudio.data import (                                          # noqa: 
     reset_provider,
     settings_with_source,
 )
+from quantstudio.data import level2                                      # noqa: E402
 from quantstudio.data import symbols as sym                             # noqa: E402
 from quantstudio.data.base import BaseHTTPProvider                      # noqa: E402
 from quantstudio.data.cache import DiskCache                            # noqa: E402
@@ -1019,8 +1023,10 @@ class CompositeFallbackTest(unittest.TestCase):
         self.sina = _FlakyProvider("sina")
         self.tencent = _StubTencent(self.settings)      # 固定样本，不依赖网络
         self.eastmoney = _FlakyProvider("eastmoney")
+        self.ths = _FlakyProvider("ths")                # 新增源同样用替身：测试绝不联网
         self.composite = CompositeProvider(self.settings, providers={
             "sina": self.sina, "tencent": self.tencent, "eastmoney": self.eastmoney,
+            "ths": self.ths, "file": None,
             "csv": CsvProvider(self.settings), "sample": self.sample,
         })
 
@@ -1031,6 +1037,7 @@ class CompositeFallbackTest(unittest.TestCase):
         self.sina.fail = True
         self.eastmoney.fail = True
         self.tencent.fail = True
+        self.ths.fail = True
     def test_primary_ok_meta(self):
         quotes = self.composite.latest_quotes(["600519.SH"])
         self.assertEqual(len(quotes), 1)
@@ -1107,6 +1114,7 @@ class CompositeFallbackTest(unittest.TestCase):
             sample = SampleProvider(settings)
             composite = CompositeProvider(settings, providers={
                 "sina": _FailProvider(), "tencent": _FailProvider(), "eastmoney": _FailProvider(),
+                "ths": _FailProvider(), "file": None,
                 "csv": CsvProvider(settings), "sample": sample,
             })
             quotes = composite.latest_quotes(["600519.SH"])
@@ -1152,15 +1160,15 @@ class CompositeFallbackTest(unittest.TestCase):
         self.assertEqual(described["provider"], "composite")
         self.assertEqual(described["mode"], "auto")
         self.assertEqual(described["realtime_chain"],
-                         ["sina", "tencent", "eastmoney", "cache", "csv", "sample"])
+                         ["sina", "tencent", "eastmoney", "ths", "cache", "csv", "sample"])
         self.assertEqual(described["history_chain"],
-                         ["eastmoney", "tencent", "sina", "cache", "csv", "sample"])
+                         ["eastmoney", "tencent", "sina", "ths", "cache", "csv", "sample"])
         self.assertEqual(described["sectors_chain"],
                          ["eastmoney", "tencent", "cache", "csv", "sample"])
         self.assertEqual(described["breadth_chain"],
                          ["eastmoney", "tencent", "cache", "csv", "sample"])
         self.assertEqual(self.composite.sources(),
-                         ["sina", "tencent", "eastmoney", "cache", "csv", "sample"])
+                         ["sina", "tencent", "eastmoney", "ths", "file", "cache", "csv", "sample"])
         self.assertIn("sources", described)
         self.assertIn("cache", described)
         # cache 是内部兜底层：必须如实报告，不能显示成「构造失败的数据源」
@@ -1359,6 +1367,382 @@ def _with(settings, **kwargs):
     params.update(kwargs)
     return Settings(**params)
 
+
+
+# --------------------------------------------------------------------------- 盘口 / 逐笔（离线）
+def _tx_quote_fields(name, code, price, prev_close, bids, asks, outer=0, inner=0,
+                     ts="20260924161444"):
+    """按腾讯快照 ``~`` 字段顺序拼一行（9-18 买档、19-28 卖档、30 时间）。"""
+    fields = ["1", name, code, "%.2f" % price, "%.2f" % prev_close, "%.2f" % price, "0",
+              str(outer), str(inner)]
+    for bid_price, bid_volume in bids:
+        fields += ["%.2f" % bid_price, str(bid_volume)]
+    for ask_price, ask_volume in asks:
+        fields += ["%.2f" % ask_price, str(ask_volume)]
+    return fields + ["", ts]
+
+
+def _tx_quote_line(code, fields):
+    return 'v_%s="%s";' % (code, "~".join(fields))
+
+
+def _tx_tick_row(seq, clock, price, side, hands=1):
+    """腾讯逐笔一行：序号/时间/价格/涨跌/手数/金额/方向。"""
+    return "%d/%s/%.2f/0.00/%d/%d/%s" % (seq, clock, price, hands, int(price * hands * 100), side)
+
+
+def _tx_tick_page(rows):
+    return 'v_detail_data_sh600519=[0,"%s"];' % "|".join(rows)
+
+
+class _StubTencentL2(TencentProvider):
+    """覆写 ``_fetch`` 注入假 HTTP（腾讯盘口 / 逐笔共用，绝不联网）。"""
+
+    def __init__(self, settings=None, body=b"", charset="", pages=None):
+        TencentProvider.__init__(self, settings)
+        self._body = body
+        self._charset = charset
+        self.pages = pages or {}
+        self.requests = []
+
+    def _fetch(self, url, referer="", params=None, headers=None):
+        self.requests.append({"url": url, "params": dict(params or {}), "referer": referer})
+        if params and "p" in params:
+            return self.pages.get(str(int(params["p"])), "").encode("gbk", "ignore"), ""
+        return self._body, self._charset
+
+
+class TencentOrderBookTest(unittest.TestCase):
+    """腾讯五档盘口：GBK 解码 / 买一卖一 / 外盘内盘 / 时间戳（全部离线）。"""
+
+    def setUp(self):
+        self.settings, self.tmp = _tmp_settings()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _provider(self, lines, charset="GBK"):
+        body = ("\n".join(lines) + "\n").encode("gbk")
+        return _StubTencentL2(self.settings, body=body, charset=charset)
+
+    def test_fields(self):
+        fields = _tx_quote_fields(
+            "贵州茅台", "600519", 1237.0, 1251.24,
+            bids=[(1237.00, 13), (1236.95, 4), (1236.85, 1), (1236.83, 1), (1236.51, 2)],
+            asks=[(1237.05, 1), (1237.50, 1), (1237.70, 1), (1237.90, 1), (1237.97, 1)],
+            outer=13918, inner=17321)
+        provider = self._provider([_tx_quote_line("sh600519", fields)], charset="")   # 无 charset 头
+        book = provider.orderbook("600519.SH")
+        self.assertEqual(book.code, "600519.SH")
+        self.assertEqual(book.name, "贵州茅台")              # GBK 解码正确
+        self.assertEqual(book.source, "tencent")
+        self.assertAlmostEqual(book.price, 1237.0, places=2)
+        self.assertAlmostEqual(book.prev_close, 1251.24, places=2)
+        self.assertEqual(book.ts, "2026-09-24 16:14:44")     # 索引 30 的 YYYYMMDDHHMMSS
+        self.assertEqual(book.levels, 5)
+        self.assertEqual((len(book.bids), len(book.asks)), (5, 5))
+        self.assertAlmostEqual(book.bids[0].price, 1237.0, places=3)
+        self.assertEqual(book.bids[0].volume, 13)            # 单位：手
+        self.assertAlmostEqual(book.bids[0].amount, 1237.0 * 13 * 100, places=2)
+        self.assertEqual(book.bids[4].volume, 2)
+        self.assertAlmostEqual(book.asks[0].price, 1237.05, places=3)
+        self.assertEqual(book.outer_volume, 13918)
+        self.assertEqual(book.inner_volume, 17321)
+        request = provider.requests[0]
+        self.assertTrue(request["url"].endswith("q=sh600519"), request["url"])
+        self.assertEqual(request["referer"], TencentProvider.referer)
+
+    def test_all_zero_or_empty_raises(self):
+        zero = _tx_quote_fields("贵州茅台", "600519", 0.0, 0.0,
+                                bids=[(0.0, 0)] * 5, asks=[(0.0, 0)] * 5)
+        with self.assertRaises(ProviderUnavailable):
+            self._provider([_tx_quote_line("sh600519", zero)]).orderbook("600519.SH")
+        with self.assertRaises(ProviderUnavailable):
+            self._provider(['v_sh600519="";']).orderbook("600519.SH")
+        with self.assertRaises(SymbolNotFound):
+            self._provider(['v_sh600519="";']).orderbook("bad-code")
+
+
+class TencentTicksTest(unittest.TestCase):
+    """腾讯逐笔：多页组装 / limit 截断 / 空页到底 / 升序返回（全部离线）。"""
+
+    #: 4 页 × 3 条 = 12 条（第 4 页起为空 → 到底）
+    TIMES = ["09:25:02", "09:30:00", "09:31:11", "09:32:00", "09:33:29", "09:34:02",
+             "09:35:15", "09:36:01", "09:37:11", "09:38:04", "09:39:20", "09:40:59"]
+    SIDES = ("B", "S", "M")
+
+    def setUp(self):
+        self.settings, self.tmp = _tmp_settings()
+        self.pages = {}
+        for page in range(4):
+            rows = []
+            for offset in range(3):
+                seq = page * 3 + offset
+                rows.append(_tx_tick_row(seq, self.TIMES[seq], 1250.0 - seq * 0.5,
+                                         self.SIDES[seq % 3], hands=seq + 1))
+            self.pages[str(page)] = _tx_tick_page(rows)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _provider(self):
+        return _StubTencentL2(self.settings, pages=self.pages)
+
+    def test_ascending_assembly_and_limit_truncation(self):
+        provider = self._provider()
+        ticks = provider.ticks("600519.SH", limit=5)
+        self.assertEqual(len(ticks), 5)                      # 不超过 limit
+        self.assertEqual([tick.time for tick in ticks], self.TIMES[-5:])
+        self.assertEqual([tick.side for tick in ticks],
+                         ["sell", "neutral", "buy", "sell", "neutral"])
+        pages_requested = [int(item["params"]["p"]) for item in provider.requests
+                           if item["params"]]
+        self.assertIn(4, pages_requested)                    # 探测到首个空页（第 4 页）
+        self.assertEqual(max(pages_requested), 4)            # 空页即停，不继续向后扫
+
+    def test_limit_larger_than_available_returns_all(self):
+        provider = self._provider()
+        ticks = provider.ticks("600519.SH", limit=999)
+        self.assertEqual(len(ticks), 12)
+        self.assertEqual([tick.time for tick in ticks], self.TIMES)
+        pages_requested = [int(item["params"]["p"]) for item in provider.requests
+                           if item["params"]]
+        self.assertEqual(min(pages_requested), 0)            # 翻到第 0 页即停（无负页码）
+
+    def test_page_request_shape(self):
+        provider = self._provider()
+        provider.ticks("600519.SH", limit=3)
+        first = provider.requests[0]
+        self.assertTrue(first["url"].startswith(TencentProvider.TICKS_URL))
+        self.assertEqual(first["params"]["appn"], "detail")
+        self.assertEqual(first["params"]["action"], "data")
+        self.assertEqual(first["params"]["c"], "sh600519")
+        self.assertEqual(first["params"]["p"], 0)
+        self.assertEqual(first["referer"], TencentProvider.referer)
+
+    def test_all_pages_empty_or_bad_limit(self):
+        provider = _StubTencentL2(self.settings, pages={})
+        with self.assertRaises(ProviderUnavailable):
+            provider.ticks("600519.SH", limit=140)
+        with self.assertRaises(ValidationError):
+            provider.ticks("600519.SH", limit="bad")
+
+
+def _sina_book_fields(name, open_, prev, last, bids, asks, day="2026-09-24", clock="14:59:00"):
+    """按新浪 ``list=`` 字段顺序拼一行（10 起买档、20 起卖档、30 日期 / 31 时间）。"""
+    fields = [name, "%.3f" % open_, "%.3f" % prev, "%.3f" % last, "%.3f" % last, "%.3f" % last,
+              "%.3f" % bids[0][0], "%.3f" % asks[0][0], "12345600", "987654321.0"]
+    for price, shares in bids:
+        fields += [str(shares), "%.3f" % price]
+    for price, shares in asks:
+        fields += [str(shares), "%.3f" % price]
+    return fields + [day, clock, "00"]
+
+
+class _StubSinaL2(SinaProvider):
+    """覆写 ``_fetch`` 注入假 HTTP（新浪盘口，绝不联网）。"""
+
+    def __init__(self, settings=None, body=b"", charset="", fail=False):
+        SinaProvider.__init__(self, settings)
+        self._body = body
+        self._charset = charset
+        self.fail = fail
+        self.requests = []
+
+    def _fetch(self, url, referer="", params=None, headers=None):
+        self.requests.append({"url": url, "referer": referer})
+        if self.fail:
+            raise DataSourceError("模拟新浪网络故障")
+        return self._body, self._charset
+
+
+class SinaOrderBookTest(unittest.TestCase):
+    """新浪五档盘口：股 → 手换算 / Referer / 空响应（全部离线）。"""
+
+    def setUp(self):
+        self.settings, self.tmp = _tmp_settings()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_fields(self):
+        fields = _sina_book_fields(
+            "贵州茅台", 1250.0, 1251.24, 1237.0,
+            bids=[(1237.0, 1300), (1236.95, 400), (1236.85, 100), (1236.83, 300), (1236.51, 200)],
+            asks=[(1237.05, 100), (1237.50, 500), (1237.70, 100), (1237.90, 100), (1237.97, 200)])
+        text = _sina_line("sh600519", fields)
+        provider = _StubSinaL2(self.settings, body=text.encode("gbk"))
+        book = provider.orderbook("600519.SH")
+        self.assertEqual(book.code, "600519.SH")
+        self.assertEqual(book.name, "贵州茅台")
+        self.assertEqual(book.source, "sina")
+        self.assertEqual(book.levels, 5)
+        self.assertAlmostEqual(book.price, 1237.0, places=3)
+        self.assertAlmostEqual(book.prev_close, 1251.24, places=3)
+        self.assertEqual(book.ts, "2026-09-24 14:59:00")
+        self.assertEqual((len(book.bids), len(book.asks)), (5, 5))
+        self.assertAlmostEqual(book.bids[0].price, 1237.0, places=3)
+        self.assertEqual(book.bids[0].volume, 13)            # 1300 股 → 13 手
+        self.assertAlmostEqual(book.bids[0].amount, 1237.0 * 1300, places=2)
+        self.assertEqual(book.bids[3].volume, 3)             # 300 股 → 3 手
+        self.assertAlmostEqual(book.asks[1].price, 1237.5, places=3)
+        self.assertEqual(book.outer_volume, 0)               # 新浪快照没有外盘 / 内盘
+        request = provider.requests[0]
+        self.assertTrue(request["url"].endswith("list=sh600519"), request["url"])
+        self.assertEqual(request["referer"], SinaProvider.referer)
+
+    def test_empty_or_failed_raises_provider_unavailable(self):
+        empty = _StubSinaL2(self.settings, body=_sina_line("sh600519", []).encode("gbk"))
+        with self.assertRaises(ProviderUnavailable):
+            empty.orderbook("600519.SH")
+        broken = _StubSinaL2(self.settings, fail=True)
+        with self.assertRaises(ProviderUnavailable):
+            broken.orderbook("600519.SH")
+
+
+def _sample_book(source="tencent", price=1237.0):
+    return OrderBook(
+        code="600519.SH", name="贵州茅台", price=price, prev_close=1251.24,
+        ts="2026-09-24 14:59:00", source=source, levels=5,
+        bids=[OrderBookLevel(price=price - 0.01, volume=13,
+                             amount=round((price - 0.01) * 13 * 100, 2))],
+        asks=[OrderBookLevel(price=price + 0.01, volume=7,
+                             amount=round((price + 0.01) * 7 * 100, 2))],
+        outer_volume=100, inner_volume=200,
+    )
+
+
+class _Level2Stub:
+    """只有 orderbook / ticks 的替身源（注入 CompositeProvider 验证降级链）。"""
+
+    def __init__(self, name="stub", book=None, ticks=None, exc=None):
+        self.name = name
+        self.book = book
+        self.ticks_value = list(ticks or [])
+        self.exc = exc
+        self.calls = []
+
+    def orderbook(self, code):
+        self.calls.append(("orderbook", code))
+        if self.exc:
+            raise self.exc
+        return self.book
+
+    def ticks(self, code, limit=600):
+        self.calls.append(("ticks", code, limit))
+        if self.exc:
+            raise self.exc
+        return list(self.ticks_value)
+
+
+class CompositeLevel2Test(unittest.TestCase):
+    """CompositeProvider 的盘口 / 逐笔 / 资金流（注入替身源，全部离线）。"""
+
+    def setUp(self):
+        self.settings, self.tmp = _tmp_settings()
+        self.fail_exc = ProviderUnavailable("模拟盘口故障")
+        self.tencent = _Level2Stub("tencent", book=_sample_book("tencent"))
+        self.sina = _Level2Stub("sina", book=_sample_book("sina", price=1236.0))
+        self.composite = CompositeProvider(self.settings, providers={
+            "sina": self.sina,
+            "tencent": self.tencent,
+            "eastmoney": _Level2Stub("eastmoney", exc=self.fail_exc),
+            "csv": CsvProvider(self.settings),
+            "sample": SampleProvider(self.settings),
+        })
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_tencent_first(self):
+        book = self.composite.orderbook("600519.SH")
+        self.assertEqual(book.source, "tencent")
+        self.assertEqual(self.composite.last_meta.source, "tencent")
+        self.assertFalse(self.composite.last_meta.offline)
+        self.assertEqual([call[0] for call in self.tencent.calls], ["orderbook"])
+        self.assertEqual(self.sina.calls, [])                 # 腾讯成功 → 不碰新浪
+
+    def test_falls_back_to_sina_when_tencent_fails(self):
+        self.tencent.exc = self.fail_exc
+        book = self.composite.orderbook("600519.SH")
+        self.assertEqual(book.source, "sina")
+        self.assertEqual(self.composite.last_meta.source, "sina")
+        self.assertFalse(self.composite.last_meta.offline)
+        self.assertEqual([call[0] for call in self.tencent.calls], ["orderbook"])
+        self.assertEqual([call[0] for call in self.sina.calls], ["orderbook"])
+        self.assertTrue(any("tencent.orderbook 失败" in note
+                            for note in self.composite.last_meta.notes))
+
+    def test_all_failed_falls_back_to_cache(self):
+        first = self.composite.orderbook("600519.SH")
+        self.tencent.exc = self.fail_exc
+        self.sina.exc = self.fail_exc
+        cached = self.composite.orderbook("600519.SH")
+        self.assertEqual(self.composite.last_meta.source, "cache")
+        self.assertTrue(self.composite.last_meta.offline)
+        self.assertAlmostEqual(cached.price, first.price, places=3)
+        self.assertIsInstance(cached.bids[0], OrderBookLevel)  # 嵌套档位也要还原
+        self.assertAlmostEqual(cached.bids[0].amount, first.bids[0].amount, places=2)
+
+    def test_all_failed_raises_data_source_error(self):
+        self.tencent.exc = self.fail_exc
+        self.sina.exc = self.fail_exc
+        with self.assertRaises(DataSourceError):               # ProviderUnavailable 是其子类
+            self.composite.orderbook("600519.SH")
+        self.assertEqual(self.composite.last_meta.source, "unavailable")
+
+    def test_ticks_and_capital_flow(self):
+        self.tencent.ticks_value = [
+            Tick(time="09:30:00", price=100.0, volume=15000, amount=1_500_000.0, side="buy"),
+            Tick(time="09:31:00", price=100.0, volume=3000, amount=300_000.0, side="sell"),
+            Tick(time="09:32:00", price=100.0, volume=600, amount=60_000.0, side="buy"),
+            Tick(time="09:33:00", price=100.0, volume=100, amount=10_000.0, side="buy"),
+        ]
+        items = self.composite.ticks("600519.SH", 10)
+        self.assertEqual(len(items), 4)
+        self.assertEqual(self.composite.last_meta.source, "tencent")
+        self.assertEqual([call[0] for call in self.tencent.calls], ["ticks"])
+        flow = self.composite.capital_flow("600519.SH", 10)
+        self.assertEqual(flow.code, "600519.SH")
+        self.assertEqual(flow.source, "tencent")
+        self.assertEqual(flow.ts, "09:33:00")                  # 取最新一条逐笔
+        self.assertEqual(flow.tick_count, 4)
+        self.assertAlmostEqual(flow.main_net, 1_200_000.0, places=2)   # 超大买 150 万 − 大卖 30 万
+        self.assertEqual(flow.buckets["super_big"]["count"], 1)
+        self.assertAlmostEqual(flow.buckets["big"]["net"], -300_000.0, places=2)
+
+
+class Level2ExportTest(unittest.TestCase):
+    """``data.level2`` 导出与能力协商（协议只加 docstring，不加必需方法）。"""
+
+    def setUp(self):
+        self.settings, self.tmp = _tmp_settings()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_module_export_and_capabilities(self):
+        # 模块级 `from quantstudio.data import level2` 本身就是「导出契约」的断言
+        self.assertTrue(callable(level2.parse_tencent_orderbook))
+        self.assertTrue(callable(level2.compute_capital_flow))
+        caps = level2.capabilities(TencentProvider(self.settings))
+        self.assertTrue(caps["orderbook"])
+        self.assertEqual(caps["orderbook_levels"], 5)
+        self.assertTrue(caps["ticks"])
+        self.assertFalse(caps["orders"])
+        self.assertFalse(caps["queue"])
+        sina_caps = level2.capabilities(SinaProvider(self.settings))
+        self.assertTrue(sina_caps["orderbook"])
+        self.assertFalse(sina_caps["ticks"])
+        composite_caps = level2.capabilities(CompositeProvider(self.settings))
+        self.assertTrue(composite_caps["orderbook"])
+        self.assertTrue(composite_caps["ticks"])
+        self.assertEqual(composite_caps["orderbook_levels"], 5)
+
+    def test_data_provider_protocol_still_matches(self):
+        from quantstudio.core.interfaces import DataProvider
+        self.assertIsInstance(TencentProvider(self.settings), DataProvider)
+        self.assertIsInstance(CompositeProvider(self.settings), DataProvider)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

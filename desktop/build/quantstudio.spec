@@ -87,6 +87,7 @@ _DESKTOP_HIDDEN = [
     "quantstudio_desktop.views.backtest",
     "quantstudio_desktop.views.portfolio",
     "quantstudio_desktop.views.trade",
+    "quantstudio_desktop.views.level2",
     # MCP 服务器（桌面版 `--mcp`）：tools_*.py 由 tools.py 的 importlib 动态导入，
     # resources/prompts 在 cli.build_server 里惰性导入 —— 静态分析都看不到，必须显式列。
     "quantstudio.mcp",

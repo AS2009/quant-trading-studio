@@ -181,6 +181,19 @@ class GuiServices:
     def remove_watchlist(self, code: str) -> List[str]:
         return self.services.market.remove_from_watchlist(code)
 
+    # ------------------------------------------------------------------ 盘口 / L2
+    @property
+    def level2(self) -> Any:
+        """盘口 / L2 服务命名空间（``services/level2_service.py``，与 Web/MCP 共用同一份 JSON 契约）。
+
+        页面按 ``services.level2.orderbook(code) / .ticks(code, limit) / .capital_flow(code, limit)``
+        调用；``Services`` 尚未接入 level2 时抛出可读错误，页面会把它画成内联空状态（不弹窗）。
+        """
+        try:
+            return self.services.level2
+        except AttributeError:
+            raise RuntimeError("服务层未提供 level2（需要 quantstudio/services/level2_service.py）")
+
     # ------------------------------------------------------------------ 策略
     def strategies(self) -> List[Dict[str, Any]]:
         return self.services.strategies.list_strategies()

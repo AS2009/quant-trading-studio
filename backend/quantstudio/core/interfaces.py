@@ -27,7 +27,14 @@ from .models import (
 
 @runtime_checkable
 class DataProvider(Protocol):
-    """行情数据源。所有方法**必须**是只读的，且失败时抛 DataSourceError 子类。"""
+    """行情数据源。所有方法**必须**是只读的，且失败时抛 DataSourceError 子类。
+
+    **可选能力（duck-typing，不是协议方法，因此不参与 isinstance 检查）**：
+    ``orderbook(code) -> OrderBook`` 与 ``ticks(code, limit) -> List[Tick]``。
+    免费源只能给 5 档盘口与逐笔成交（逐笔方向是第三方「盘口方向标记」），
+    十档行情 / 逐笔委托 / 委托队列需要付费 Level-2 源；能力探测见
+    ``quantstudio.data.level2.capabilities(provider)``。
+    """
 
     name: str  # sina / eastmoney / csv / sample / composite
 

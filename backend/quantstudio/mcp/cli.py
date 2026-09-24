@@ -26,6 +26,8 @@ from .server import Server
 from .tools import build_registry
 
 REPORT_FILENAME = "quantstudio_mcp_selftest.txt"
+#: ``build_registry()`` 里注册的工具总数（--read-only 只隐藏写工具；新增工具组时同步更新）
+EXPECTED_TOOL_COUNT = 36
 
 
 # --------------------------------------------------------------------------- 装配
@@ -145,7 +147,12 @@ def selftest(read_only: bool = False) -> int:
     for item in tools:
         groups[item["name"].split("_")[0]] = groups.get(item["name"].split("_")[0], 0) + 1
     report.line("  分组        : %s" % ", ".join("%s×%d" % (k, v) for k, v in sorted(groups.items())))
-    check(len(tools) >= 10, "工具数量合理", "只有 %d 个" % len(tools))
+    if read_only:                               # 只读模式会隐藏写工具，按注册表推算可见数
+        expected_tools = len(server.registry) - len(
+            [spec for spec in server.registry.all() if not spec.read_only])
+    else:
+        expected_tools = EXPECTED_TOOL_COUNT
+    check(len(tools) == expected_tools, "工具数量为 %d" % expected_tools, "当前 %d 个" % len(tools))
     check(all(item.get("name") and item.get("description") and item.get("inputSchema") for item in tools),
           "每个工具都有 name/description/inputSchema")
     check(all("annotations" in item for item in tools), "每个工具都带 annotations（只读/破坏性提示）")

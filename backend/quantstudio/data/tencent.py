@@ -55,6 +55,19 @@
    - 腾讯口径下成交量统一为 **手**（个股 25017 手 = 新浪 2501689 股 / 100），故 ``volume_wan = 手/1e4``。
    - 未返回 / 字段不足的标的跳过并记入 ``self.last_skipped``（与新浪一致）。
 
+4. 五档盘口与逐笔成交（``qt.gtimg.cn`` / ``stock.gtimg.cn``）::
+
+       GET https://qt.gtimg.cn/q=sh600519                       # 五档盘口（GBK）
+       GET https://stock.gtimg.cn/data/index.php?appn=detail&action=data&c=sh600519&p=0
+
+   - 盘口：``~`` 分隔字段 9-18 为买一~买五（价 / 量，**手**）、19-28 为卖一~卖五、
+     7 / 8 为外盘 / 内盘（手）、30 为时间；解析见
+     :func:`quantstudio.data.level2.parse_tencent_orderbook`，解析失败或价格为 0
+     抛 ``ProviderUnavailable``；
+   - 逐笔：响应 ``v_detail_data_sh600519=[p,"序号/时间/价格/涨跌/手数/金额/方向|…"]``，
+     ``p`` 从 0 开始、**越大的页越晚**（每页实测 70 条，空页表示到底，全天约 60 页）；
+     方向 ``B`` / ``S`` / ``M`` 是第三方「盘口方向标记」，**不是**交易所 L2 的主动买卖。
+
 市场广度口径（**重要**）
 ------------------------
 - 涨跌家数 = **31 个行业板块 ``zgb`` 求和**（实测合计约 9400 家，含新三板等，**大于沪深 A 股
@@ -71,10 +84,12 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from ..core.errors import (
     DataSourceError,
+    ProviderUnavailable,
     SymbolNotFound,
     ValidationError,
 )
-from ..core.models import Bar, IndexQuote, MarketBreadth, Quote, SectorQuote
+from ..core.models import Bar, IndexQuote, MarketBreadth, OrderBook, Quote, SectorQuote, Tick
+from . import level2
 from . import symbols as sym
 from .base import BaseHTTPProvider
 
@@ -97,6 +112,11 @@ class TencentProvider(BaseHTTPProvider):
     KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
     RANK_URL = "https://proxy.finance.qq.com/cgi/cgi-bin/rank/pt/getRank"
     SNAPSHOT_URL = "https://qt.gtimg.cn/q="
+    TICKS_URL = "https://stock.gtimg.cn/data/index.php"
+    #: 免费源盘口固定 5 档（十档需付费 Level-2，见 ``data/level2.py``）
+    ORDERBOOK_LEVELS = 5
+    #: 逐笔末页探测上限（全天实测约 60 页；再大视为到底）
+    TICKS_MAX_PAGE = 90
 
     #: 单次 K 线请求最大根数（实测 800；再大服务端会截到约 640）
     BARS_PER_REQUEST = 800
@@ -401,6 +421,102 @@ class TencentProvider(BaseHTTPProvider):
         if isinstance(fields, list) and len(fields) > 1:
             return str(fields[1]).strip()
         return ""
+
+    # ============================================================== 盘口 / 逐笔
+    def orderbook(self, code: str) -> OrderBook:
+        """五档盘口（``qt.gtimg.cn``，GBK；含外盘 / 内盘）。
+
+        解析失败或价格为 0（停牌 / 未返回）时抛 :class:`ProviderUnavailable`，
+        由 Composite 降级到新浪 / 缓存 / CSV / 示例。
+        """
+        try:
+            norm = sym.normalize(code)
+        except SymbolNotFound as exc:
+            raise SymbolNotFound("腾讯无法识别标的 %r：%s" % (code, exc))
+        url = self.SNAPSHOT_URL + self._code_to_sina(norm)
+        text = self._get_text(url, referer=self.referer, encoding="gbk")
+        book = level2.parse_tencent_orderbook(text, code=norm)
+        if book is None or book.price <= 0:
+            raise ProviderUnavailable(
+                "腾讯未返回 %s 的五档盘口（解析失败或价格全 0）" % norm
+            )
+        if book.name:
+            self.remember_name(norm, book.name)
+        return book
+
+    def ticks(self, code: str, limit: int = 600) -> List[Tick]:
+        """当日逐笔成交（``stock.gtimg.cn/data/index.php?appn=detail``）。
+
+        ``p`` 从 0 开始、**越大的页越晚**（每页约 70 条，空页表示到底）。实现先向后
+        探测最后一页（1 / 2 / 4 / … 倍速探测 + 二分回退），再从末页向前翻页收集，
+        最后按时间升序返回、条数不超过 ``limit``；全部为空时抛
+        :class:`ProviderUnavailable`。方向 ``B`` / ``S`` / ``M`` 是第三方「盘口方向
+        标记」，不是交易所 L2 的主动买卖。
+        """
+        try:
+            norm = sym.normalize(code)
+        except SymbolNotFound as exc:
+            raise SymbolNotFound("腾讯无法识别标的 %r：%s" % (code, exc))
+        try:
+            top = int(limit)
+        except (TypeError, ValueError):
+            raise ValidationError("limit 需为整数，当前为 %r" % (limit,), field="limit")
+        if top <= 0:
+            return []
+        tx_symbol = self._code_to_sina(norm)
+        last_page = self._last_tick_page(tx_symbol)
+        if last_page is None:
+            raise ProviderUnavailable("腾讯未返回 %s 的逐笔成交明细" % norm)
+        pages: List[List[Tick]] = []
+        count = 0
+        for page in range(last_page, -1, -1):
+            page_ticks = self._tick_page(tx_symbol, page)
+            if not page_ticks:
+                continue                     # 单页为空：跳过，不阻断更早的页
+            pages.append(page_ticks)
+            count += len(page_ticks)
+            if count >= top:
+                break
+        merged: List[Tick] = []
+        for page_ticks in reversed(pages):
+            merged.extend(page_ticks)
+        if not merged:
+            raise ProviderUnavailable("腾讯未返回 %s 的逐笔成交明细" % norm)
+        merged.sort(key=lambda tick: tick.time)
+        return merged[-top:]
+
+    def _tick_page(self, tx_symbol: str, page: int) -> List[Tick]:
+        """取逐笔某一页（``p`` 从 0 开始，越大的页越晚；空页返回空列表）。"""
+        text = self._get_text(self.TICKS_URL, referer=self.referer, params={
+            "appn": "detail", "action": "data", "c": tx_symbol, "p": page,
+        })
+        return level2.parse_tencent_ticks(text, code=tx_symbol)
+
+    def _last_tick_page(self, tx_symbol: str) -> Optional[int]:
+        """探测当日最后一页：1 / 2 / 4 / … 倍速找到首个空页，再二分回退。
+
+        全天约 60 页（每页约 70 条 ≈ 最近 4000 笔），倍速 + 二分把探测控制在约 12 次
+        请求；第 0 页也为空时返回 ``None``（该标的当日无逐笔）。
+        """
+        if not self._tick_page(tx_symbol, 0):
+            return None
+        low, high = 0, None
+        page = 1
+        while page <= self.TICKS_MAX_PAGE:
+            if not self._tick_page(tx_symbol, page):
+                high = page
+                break
+            low = page
+            page *= 2
+        if high is None:
+            high = self.TICKS_MAX_PAGE + 1
+        while low + 1 < high:
+            mid = (low + high) // 2
+            if self._tick_page(tx_symbol, mid):
+                low = mid
+            else:
+                high = mid
+        return low
 
     # ================================================================== 板块
     def sectors(self, limit: int = 20) -> List[SectorQuote]:

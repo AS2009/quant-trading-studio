@@ -19,6 +19,14 @@
 
       eastmoney → tencent → 磁盘缓存 → CSV → 示例数据
 
+- 盘口 / 逐笔（``orderbook`` / ``ticks``）::
+
+      tencent → sina → 磁盘缓存（过期也返回） → CSV → 示例数据
+
+  这两条链**显式腾讯优先**（``CHAIN_PRIORITY["realtime"]`` 是新浪优先）：只有腾讯快照带
+  外盘 / 内盘，也只有腾讯（免费源里）提供逐笔成交；``capital_flow`` 不做本地降级，
+  直接由 ``ticks`` 按单笔成交额分档自算。
+
 ``sina`` 不提供 K 线 / 板块 / 广度（抛 ``ProviderUnavailable``），放在历史链里只是「按序尝试」；
 ``ProviderUnavailable`` 与 ``DataSourceError`` 一样会被视为该源不可用并继续往下走。
 
@@ -50,30 +58,45 @@ from ..core.errors import (
     SymbolNotFound,
     ValidationError,
 )
-from ..core.models import Bar, DataMeta, IndexQuote, MarketBreadth, Quote, SectorQuote
+from ..core.models import (
+    Bar, CapitalFlow, DataMeta, IndexQuote, MarketBreadth, OrderBook, OrderBookLevel,
+    Quote, SectorQuote, Tick,
+)
+from . import level2
 from . import symbols as sym
 from .cache import DiskCache, make_key
 from .csv_provider import CsvProvider
 from .eastmoney import EastmoneyProvider
+from .level2_import import Level2FileProvider
 from .sample import SampleProvider
 from .sina import SinaProvider
 from .tencent import TencentProvider
+from .ths import ThsProvider
 
 __all__ = ["CompositeProvider"]
 
 #: 本地数据来源（命中即视为离线降级）
 LOCAL_SOURCES = ("cache", "csv", "sample")
 #: 真实数据源名称
-PROVIDER_LABELS = ("sina", "tencent", "eastmoney", "csv", "sample")
-#: 降级链里出现的环节名（含内部兜底 ``cache``，供 sources() / describe() 展示）
-CHAIN_LABELS = ("sina", "tencent", "eastmoney", "cache", "csv", "sample")
+PROVIDER_LABELS = ("sina", "tencent", "eastmoney", "ths", "csv", "sample")
+#: 降级链里出现的环节名（含内部兜底 ``cache`` 与本地导入 ``file``，供 sources() / describe() 展示）
+CHAIN_LABELS = ("sina", "tencent", "eastmoney", "ths", "file", "cache", "csv", "sample")
 #: 各类调用的默认优先级（mode 只把首选源提到最前，其余顺序不变）
 CHAIN_PRIORITY = {
-    "realtime": ["sina", "tencent", "eastmoney"],
-    "history": ["eastmoney", "tencent", "sina"],
+    "realtime": ["sina", "tencent", "eastmoney", "ths"],
+    "history": ["eastmoney", "tencent", "sina", "ths"],
     "sectors": ["eastmoney", "tencent"],
     "breadth": ["eastmoney", "tencent"],
 }
+
+#: 盘口 / 逐笔专用链：**显式腾讯优先**（``CHAIN_PRIORITY["realtime"]`` 是新浪优先，
+#: 但只有腾讯快照带外盘 / 内盘，也只有腾讯提供逐笔成交）；本地导入文件（``file``）只在
+#: 导入目录里确实有文件时才插到链尾，避免给没有付费数据的用户刷 ``meta.notes``。
+ORDERBOOK_CHAIN = ("tencent", "sina")
+TICKS_CHAIN = ("tencent",)
+#: 缓存反序列化时要还原的嵌套档位（字段名 → 元素 dataclass）
+NESTED_MODELS = {"bids": OrderBookLevel, "asks": OrderBookLevel}
+
 _MAX_NOTES = 8
 
 
@@ -131,6 +154,8 @@ class CompositeProvider:
             "eastmoney": EastmoneyProvider,
             "csv": CsvProvider,
             "sample": SampleProvider,
+            "ths": ThsProvider,
+            "file": lambda settings: Level2FileProvider(settings=settings),
         }
         for label, factory in factories.items():
             if label in overrides:
@@ -188,7 +213,13 @@ class CompositeProvider:
 
     def _through_primary(self, kind: str, method: str, args: Tuple[Any, ...],
                          notes: List[str]) -> Optional[Tuple[str, Any]]:
-        for label in self._chain(kind):
+        """按调用类型走默认降级链（见 :data:`CHAIN_PRIORITY`）。"""
+        return self._through_labels(self._chain(kind), method, args, notes)
+
+    def _through_labels(self, labels: Sequence[str], method: str, args: Tuple[Any, ...],
+                        notes: List[str]) -> Optional[Tuple[str, Any]]:
+        """按给定顺序尝试真实源；全失败返回 ``None``（失败细节写入 notes）。"""
+        for label in labels:
             ok, value = self._call(label, method, args, {}, notes)
             if ok:
                 return label, value
@@ -196,6 +227,51 @@ class CompositeProvider:
 
     def _local_sources(self) -> List[str]:
         return [label for label in ("csv", "sample")]
+
+    def _level2_labels(self, base: Sequence[str]) -> List[str]:
+        """盘口/逐笔的候选源：仅在**导入目录里确实有文件**时把本地文件源插到链尾。
+
+        这样没有付费数据的用户不会因为「文件不存在」在 ``meta.notes`` 里看到噪音，
+        而有自己 Level-2 导出的用户在断网/离线时也能用起来（详见 docs/level2.md §4.2）。
+        """
+        labels = list(base)
+        provider = self.providers.get("file")
+        if provider is None:
+            return labels
+        try:
+            if provider.health().get("ok"):
+                labels.append("file")
+        except Exception:                     # noqa: BLE001 - 自检失败就当没有导入文件
+            pass
+        return labels
+
+    def capabilities(self) -> Dict[str, Any]:
+        """本复合 provider 的盘口级能力 = 各源能力的并集（档数取最大，其余取任一）。
+
+        服务层优先调用本方法，因此界面/MCP 看到的 ``orderbook_levels`` / ``import``
+        会如实反映「链里有没有十档源、有没有本地导入通道」。
+        """
+        merged: Dict[str, Any] = {
+            "orderbook": False, "orderbook_levels": 0, "ticks": False,
+            "orders": False, "queue": False, "import": False, "detail": "",
+        }
+        parts: List[str] = []
+        for label, provider in self.providers.items():
+            if provider is None:
+                continue
+            caps = level2.capabilities(provider)
+            if not caps.get("orderbook") and not caps.get("ticks"):
+                continue
+            merged["orderbook"] = merged["orderbook"] or bool(caps.get("orderbook"))
+            merged["orderbook_levels"] = max(merged["orderbook_levels"],
+                                             int(caps.get("orderbook_levels") or 0))
+            merged["ticks"] = merged["ticks"] or bool(caps.get("ticks"))
+            merged["orders"] = merged["orders"] or bool(caps.get("orders"))
+            merged["queue"] = merged["queue"] or bool(caps.get("queue"))
+            merged["import"] = merged["import"] or bool(caps.get("import"))
+            parts.append("%s(%s)" % (label, caps.get("detail")))
+        merged["detail"] = "；".join(parts) or "无盘口级能力"
+        return merged
 
     # ================================================================== 缓存
     def _cache_write(self, key: str, value: Any, ttl: float) -> None:
@@ -220,8 +296,23 @@ class CompositeProvider:
                 continue
             if not isinstance(item, dict):
                 continue
+            kwargs = {key: val for key, val in item.items() if key in allowed}
+            for field_name, nested_cls in NESTED_MODELS.items():
+                values = kwargs.get(field_name)
+                if not isinstance(values, list):
+                    continue
+                nested = []
+                for row in values:
+                    if isinstance(row, nested_cls):
+                        nested.append(row)
+                    elif isinstance(row, dict):
+                        try:
+                            nested.append(nested_cls(**row))
+                        except (TypeError, ValueError):
+                            continue
+                kwargs[field_name] = nested
             try:
-                out.append(cls(**{key: val for key, val in item.items() if key in allowed}))
+                out.append(cls(**kwargs))
             except (TypeError, ValueError):
                 continue
         return out
@@ -396,6 +487,90 @@ class CompositeProvider:
         if bars and str(bars[-1].date)[:10] == today:
             return self.ttl.kline_today
         return self.ttl.kline_closed
+
+    # ============================================================== 盘口 / 逐笔
+    def orderbook(self, code: str) -> OrderBook:
+        """五档盘口（tencent → sina → 缓存 → CSV → 示例；腾讯带外盘 / 内盘）。"""
+        started = time.time()
+        notes: List[str] = []
+        try:
+            norm = sym.normalize(code)
+        except SymbolNotFound:
+            self._finish("unavailable", started, ["无法识别的标的代码：%r" % (code,)])
+            raise SymbolNotFound("无法识别的标的代码：%r" % (code,))
+        key = self._key("orderbook", [norm])
+        hit = self._through_labels(self._level2_labels(ORDERBOOK_CHAIN), "orderbook", (norm,), notes)
+        if hit is not None:
+            label, book = hit
+            self._cache_write(key, book, self.ttl.quotes)
+            self._finish(label, started, notes)
+            return book
+        cached, stale = self._cache_read(key, OrderBook, notes)
+        if cached:
+            self._finish("cache", started, notes, stale=stale)
+            return cached[0]
+        for label in self._local_sources():
+            ok, value = self._call(label, "orderbook", (norm,), {}, notes)
+            if ok:
+                self._finish(label, started, notes)
+                return value
+        self._no_data("盘口", notes, started)
+
+    def ticks(self, code: str, limit: int = 600) -> List[Tick]:
+        """逐笔成交（tencent → sina → 缓存 → CSV → 示例），按时间升序、最多 ``limit`` 条。"""
+        started = time.time()
+        notes: List[str] = []
+        try:
+            norm = sym.normalize(code)
+        except SymbolNotFound:
+            self._finish("unavailable", started, ["无法识别的标的代码：%r" % (code,)])
+            raise SymbolNotFound("无法识别的标的代码：%r" % (code,))
+        try:
+            top = int(limit)
+        except (TypeError, ValueError):
+            raise ValidationError("limit 需为整数，当前为 %r" % (limit,), field="limit")
+        top = max(1, top)
+        key = self._key("ticks", [norm, top])
+        hit = self._through_labels(self._level2_labels(TICKS_CHAIN), "ticks", (norm, top), notes)
+        if hit is not None:
+            label, ticks = hit
+            self._cache_write(key, ticks, self.ttl.quotes)
+            self._finish(label, started, notes)
+            return ticks
+        cached, stale = self._cache_read(key, Tick, notes)
+        if cached:
+            self._finish("cache", started, notes, stale=stale)
+            return cached
+        for label in self._local_sources():
+            ok, value = self._call(label, "ticks", (norm, top), {}, notes)
+            if ok:
+                self._finish(label, started, notes)
+                return value
+        self._no_data("逐笔成交", notes, started)
+
+    def capital_flow(self, code: str, limit: int = 2000) -> CapitalFlow:
+        """资金流：由逐笔成交按**单笔成交额分档**自算（口径见 ``data/level2.py``）。
+
+        名称取 :meth:`resolve_name`，时间戳取最新一条逐笔；逐笔不可用时抛
+        :class:`DataSourceError`（``ProviderUnavailable`` 是其子类）。
+        """
+        started = time.time()
+        notes: List[str] = ["按逐笔单笔成交额分档自算资金流（口径见 data/level2.py）"]
+        try:
+            norm = sym.normalize(code)
+        except SymbolNotFound:
+            self._finish("unavailable", started, ["无法识别的标的代码：%r" % (code,)])
+            raise SymbolNotFound("无法识别的标的代码：%r" % (code,))
+        ticks = self.ticks(norm, limit)
+        if not ticks:
+            self._no_data("资金流", notes, started)
+        source = self.last_meta.source
+        name = self.resolve_name(norm) or ""
+        flow = level2.compute_capital_flow(
+            ticks, code=norm, name=name, ts=ticks[-1].time, source=source,
+        )
+        self._finish(source or "mixed", started, notes)
+        return flow
 
     # ================================================================== 板块 / 广度
     def sectors(self, limit: int = 20) -> List[SectorQuote]:

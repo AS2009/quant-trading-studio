@@ -12,6 +12,7 @@ from .registry import Registry, ToolError, p_bool, p_int, p_list, p_num, p_objec
 #: 工具分组模块（按顺序注册，模块名 → 领域）
 TOOL_MODULES: Tuple[str, ...] = (
     "tools_market",        # 行情、自选池、系统状态
+    "tools_level2",        # 盘口、逐笔、资金流（只读）
     "tools_strategy",      # 策略清单、源码读写与校验、用户策略
     "tools_backtest",      # 回测与缓存
     "tools_portfolio",     # 持仓账本 + 模拟盘

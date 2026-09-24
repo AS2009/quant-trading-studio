@@ -35,8 +35,11 @@ from .eastmoney import EastmoneyProvider
 from .sample import SampleProvider
 from .sina import SinaProvider
 from .tencent import TencentProvider
+from .level2_import import Level2FileProvider
+from .ths import ThsProvider
 
 from ..core.interfaces import DataProvider  # noqa: F401  （Protocol 转出，供类型标注与断言）
+from . import level2  # noqa: F401  （便于 from quantstudio.data import level2）
 from . import symbols  # noqa: F401  （便于 data.symbols.normalize 使用）
 
 __all__ = [
@@ -49,11 +52,14 @@ __all__ = [
     "CompositeProvider",
     "CsvProvider",
     "EastmoneyProvider",
+    "ThsProvider",
+    "Level2FileProvider",
     "TencentProvider",
     "SinaProvider",
     "SampleProvider",
     "DiskCache",
     "make_key",
+    "level2",
     "symbols",
 ]
 

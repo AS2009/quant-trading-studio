@@ -167,7 +167,8 @@ App.register(window.MarketView)
   .register(window.StrategiesView)
   .register(window.BacktestView)
   .register(window.PortfolioView)
-  .register(window.TradeView);
+  .register(window.TradeView)
+  .register(window.Level2View);
 
 window.App = App;
 window.addEventListener("DOMContentLoaded", () => {

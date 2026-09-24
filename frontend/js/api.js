@@ -119,6 +119,20 @@ const API = {
   kline: (code, days, freq, adjust) =>
     API.get("/api/market/kline" + API.qs({ code: code, days: days, freq: freq || "day", adjust: adjust || "qfq" })),
 
+  /* ---------------- 盘口 / L2 ---------------- */
+  /*
+   * 契约（services/level2_service.py，见 docs/level2.md）：
+   *   orderbook: {code,name,price,prev_close,ts,source,levels,summary,bids,asks,outer_volume,inner_volume,capabilities,meta}
+   *   ticks    : {code,name,count,shown,items:[{time,price,volume,amount,side,change}],stats,pages,note,meta}
+   *   flow     : {code,name,ts,source,amount_total,main_net,main_net_pct,tick_count,buckets:{...},meta}
+   * 逐笔 side 为第三方盘口标记（buy / sell / neutral），不是交易所 Level-2 口径。
+   */
+  level2Orderbook: (code) => API.get("/api/level2/" + encodeURIComponent(code) + "/orderbook"),
+  level2Ticks: (code, limit) =>
+    API.get("/api/level2/" + encodeURIComponent(code) + "/ticks" + API.qs({ limit: limit })),
+  level2Flow: (code, limit) =>
+    API.get("/api/level2/" + encodeURIComponent(code) + "/flow" + API.qs({ limit: limit })),
+
   /* ---------------- 自选池 ---------------- */
   watchlist: () => API.get("/api/watchlist"),
   addWatch: (code) => API.post("/api/watchlist", { code: code }),

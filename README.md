@@ -28,6 +28,8 @@ git clone <this-repo> && cd quant-trading-studio
    月度收益、绩效指标（年化/夏普/索提诺/卡玛/Alpha/Beta/胜率/盈亏比/换手/费用）、成交流水、期末持仓。
 4. **持仓管理** — 录入你的**真实持仓**（数量/成本/可用数量/现金），实时估值、盈亏与配置分析、权益曲线。
 5. **交易（模拟盘）** — 按实时价格模拟成交（T+1、手续费、涨跌停约束），下单/撤单/持仓/成交全部本地记账。
+6. **盘口 / L2** — 五档盘口（委比/委差/价差）、逐笔成交（第三方方向标记）、由逐笔自算的四档资金流与主力净额；
+   十档 / 逐笔委托 / 委托队列需付费授权，见 [docs/level2.md](docs/level2.md)。
 
 命令行也能用（无需启动网页）：
 
@@ -67,7 +69,7 @@ python scripts/mcp_server.py              # stdio 服务器（默认可读写）
 python scripts/mcp_server.py --read-only  # 一键只读；--selftest 自检，退出码 0/1
 ```
 
-仓库根的 `.mcp.json` 已配好 Claude Code；客户端接入、33 个工具清单、安全护栏与排障见 **[docs/mcp.md](docs/mcp.md)**。
+仓库根的 `.mcp.json` 已配好 Claude Code；客户端接入、36 个工具清单、安全护栏与排障见 **[docs/mcp.md](docs/mcp.md)**。
 
 ---
 
@@ -123,6 +125,7 @@ quant-trading-studio/
 | `views/backtest.js` | 回测分析：参数表单、指标卡、四张图、成交流水、期末持仓、警告 |
 | `views/portfolio.js` | 持仓管理：账户总览、真实持仓录入/删除、现金与模式切换、权益曲线 |
 | `views/trade.js` | 交易（模拟盘）：下单、撤单、委托与成交、账户概览、重置 |
+| `views/level2.js` | 盘口 / L2：五档盘口、逐笔成交、四档资金流 |
 | `main.js` | 初始化、Tab 路由、数据源状态条、全局错误兜底 |
 
 新增一个页面只需在 `js/views/` 加一个模块并在 `main.js` 注册，无需构建步骤。
@@ -135,16 +138,19 @@ quant-trading-studio/
 因此单个数据源被限流、改接口或断网都不会让接口报错：
 
 ```
-实时快照：新浪(GBK) ─▶ 腾讯 ─▶ 东方财富 ─▶ 磁盘缓存(可能滞后) ─▶ CSV ─▶ 示例数据
-历史K线 ：东方财富   ─▶ 腾讯 ─▶ 新浪     ─▶ 磁盘缓存          ─▶ CSV ─▶ 示例数据
+```
+实时快照：新浪(GBK) ─▶ 腾讯 ─▶ 东方财富 ─▶ 同花顺 ─▶ 磁盘缓存(可能滞后) ─▶ CSV ─▶ 示例数据
+历史K线 ：东方财富   ─▶ 腾讯 ─▶ 新浪     ─▶ 同花顺 ─▶ 磁盘缓存          ─▶ CSV ─▶ 示例数据
 板块行情：东方财富   ─▶ 腾讯 ─▶ CSV      ─▶ 示例数据
 市场广度：东方财富   ─▶ 腾讯 ─▶ CSV      ─▶ 示例数据
+盘口/逐笔：腾讯(5 档 + 逐笔) ─▶ 新浪(5 档) ─▶ 本地导入文件（详见 docs/level2.md）
 ```
 
-三个真实源的定位：
-- **新浪** `hq.sinajs.cn`：GBK 实时快照，速度快，作为默认实时源；
-- **腾讯** `qt.gtimg.cn` / `web.ifzq.gtimg.cn` / `proxy.finance.qq.com`：实时快照 + **前复权历史 K 线**（默认历史备份源）+ 行业板块（含板块涨跌家数）；
-- **东方财富** `push2*.eastmoney.com`：历史 K 线、快照、板块、资金流，字段最全，作为默认历史/板块源。
+四个真实源的定位：
+- **新浪** `hq.sinajs.cn`：GBK 实时快照，速度快，作为默认实时源（盘口数量单位是**股**）；
+- **腾讯** `qt.gtimg.cn` / `web.ifzq.gtimg.cn` / `proxy.finance.qq.com`：实时快照 + **前复权历史 K 线**（默认历史备份源）+ 行业板块（含板块涨跌家数）+ **五档盘口与逐笔成交**（唯一提供逐笔方向标记的免费源）；
+- **东方财富** `push2*.eastmoney.com`：历史 K 线、快照、板块、资金流，字段最全，作为默认历史/板块源；
+- **同花顺** `d.10jqka.com.cn`：公开 JSONP 接口的当日分时与日线，作为快照/历史的又一路备份（**不含**其付费 Level-2 内容）。
 
 > 实测提醒：东方财富对高频访问较敏感（本机在连续探测后曾出现 `RemoteDisconnected` 全站拒连），
 > 此时程序会自动切到腾讯，`meta.source` 会如实显示 `tencent`。这也是「多源互备」存在的意义。
@@ -216,6 +222,7 @@ python scripts/run_backtest.py --strategy st_my_alpha --symbols 600519.SH --star
 | [`docs/strategy-api.md`](docs/strategy-api.md) | `ctx` 上下文、`BaseStrategy` 助手、参数 schema、可用导入清单 |
 | [`docs/strategy-examples.md`](docs/strategy-examples.md) | 三个完整示例（单标的突破 / 多标的轮动 / 多指标共振）+ 常见错误对照 |
 | [`docs/ai-strategy-guide.md`](docs/ai-strategy-guide.md) | 用 AI 写策略的提示词模板、修复动作表、交付格式 |
+| [`docs/level2.md`](docs/level2.md) | 盘口 / L2：能力边界、口径（盘口单位、逐笔方向、资金流分档）、HTTP 与 MCP 用法、接入付费 L2 的两条路 |
 
 `local/` 下已附带三个通过校验的示例：`st_breakout_atr`（通道突破 + ATR 止损）、`st_rotation_topn`（动量轮动 TopN）、
 `st_macd_adx`（MACD 金叉 + ADX 趋势过滤 + 布林中轨离场，演示 `macd/kdj/boll/adx/cross` 等新指标怎么用）。
@@ -264,6 +271,9 @@ python scripts/run_backtest.py --strategy st_my_alpha --symbols 600519.SH --star
 | GET | `/api/market/overview` | 指数、市场广度、成交额、资金 |
 | GET | `/api/market/sectors?limit=20` | 板块涨幅榜 |
 | GET | `/api/market/quotes?codes=600519.SH,300750.SZ` | 实时快照（缺省=自选池） |
+| GET | `/api/level2/<code>/orderbook` | 五档盘口 + 委比/委差 + 能力协商 |
+| GET | `/api/level2/<code>/ticks?limit=120` | 逐笔成交（含多空统计） |
+| GET | `/api/level2/<code>/flow?limit=2000` | 四档资金流与主力净额（自算） |
 | GET | `/api/market/kline?code=&days=&freq=day&adjust=qfq` | K 线 |
 | GET/POST/DELETE | `/api/watchlist` `/api/watchlist/<code>` | 自选池读写 |
 | GET/POST | `/api/strategies` | 策略列表 / 新建自定义策略 |
