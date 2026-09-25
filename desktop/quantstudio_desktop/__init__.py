@@ -21,7 +21,7 @@
     python -m quantstudio_desktop --selftest-gui   # 无显示器自检（构建窗口与页面）
 """
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 
 from .boot import ensure_core_path, ensure_data_dir, is_frozen, prepare  # noqa: E402,F401
 

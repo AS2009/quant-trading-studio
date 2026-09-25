@@ -46,31 +46,39 @@ powershell -ExecutionPolicy Bypass -File desktop\build\build_windows.ps1
 powershell -ExecutionPolicy Bypass -File desktop\build\build_windows.ps1 -OneFile -SkipTests
 ```
 
-**macOS 版**：`./desktop/build/build_macos.sh` 一键产出 `QuantTradingStudio.app` + `.zip` + `.dmg`（默认 universal2，
-Intel 与 Apple Silicon 通用）——见 [方式 D](#方式-d本机打包-macos-版)。仅用于本地验证 spec 的旧脚本是
+**macOS 版**：`./desktop/build/build_macos.sh` 一键产出 `QuantTradingStudio.app` + `.zip` + `.dmg`（默认按解释器
+架构出包，Homebrew 解释器 → `arm64`）——见 [方式 D](#方式-d本机打包-macos-版)。仅用于本地验证 spec 的旧脚本是
 `desktop/build/build_unix.sh`（不生成 .app / 不签名 / 不打 dmg）。
 
 ### 方式 D：本机打包 macOS 版
 
 ```bash
-# 需要 Xcode 命令行工具（iconutil / codesign）与自带 tkinter 的 Python
-PYTHON=/usr/bin/python3 ./desktop/build/build_macos.sh            # universal2 + 自检 + zip + dmg
-bash desktop/build/build_macos.sh --arch=arm64                    # 只打当前架构
-bash desktop/build/build_macos.sh --clean --rebuild-icon
+# 1) 装一个自带 Tcl/Tk 9 的 Python（关键！见下面第 1 条注意点）
+brew install python-tk@3.12
+
+# 2) 一键：图标 → 源码自检 → 构建 .app → ad-hoc 签名 → 产物自检 → zip + dmg
+PYTHON="$(brew --prefix python@3.12)/bin/python3.12" ./desktop/build/build_macos.sh
+
+bash desktop/build/build_macos.sh --clean --rebuild-icon --skip-tests
 ```
 
-产物在 `desktop/build/output-macos/`：`dist/QuantTradingStudio.app`（约 20 MB）、
-`pkg/QuantTradingStudio-macos-universal2.zip`（约 7.4 MB）、`...dmg`（约 8.0 MB，含「应用程序」快捷方式）。
+产物在 `desktop/build/output-macos/`：`dist/QuantTradingStudio.app`（约 30 MB，含自带 Tcl/Tk）、
+`pkg/QuantTradingStudio-macos-arm64.zip`（约 12 MB）、`...dmg`（约 14 MB，含「应用程序」快捷方式）。
 
-两个 macOS 特有的注意点：
+三个 macOS 特有的注意点：
 
-* **Tcl/Tk 来自系统**：macOS 11+ 把 Tcl/Tk 放在 dyld 共享缓存里（`/System/Library/Frameworks/Tk.framework`
-  只有 stub、没有磁盘二进制），所以 `.app` 不自带 Tk 8.5，运行时用系统框架 —— 这也是 macOS 产物只有
-  Windows 一半体积的原因；
+* **Tcl/Tk 必须 ≥ 8.6，否则窗口全白**（v1.4.0 的坑）：Apple 随系统提供的 **Tk 8.5.9 是 2009 年的版本**，
+  在 macOS 10.14+ 上首次映射窗口时可能一帧都不画 —— 窗口、标题栏、滚动条都在，内容却是纯白。
+  修法是让 `.app` **自带**现代 Tcl/Tk：用 Homebrew 的 `python-tk@3.12`（Tcl/Tk 9）或 python.org 的官方安装包
+  （Tcl/Tk 8.6）打包，PyInstaller 会把 `libtcl9.0.dylib` / `libtcl9tk9.0.dylib` 与 `_tcl_data`/`_tk_data`
+  打进 `.app`，运行时不碰系统 Tk（代价是体积 +10 MB，但换来「到哪台 Mac 都一样」）；
 * **ad-hoc 签名、未公证**：脚本会做 ad-hoc 签名（Apple Silicon 上不加签名无法启动），但没有开发者签名与
   公证证书，别人首次打开需**右键 →「打开」**（只需一次），或
   `xattr -dr com.apple.quarantine /Applications/QuantTradingStudio.app` 去掉隔离标记。
-  要彻底免打扰就得买 Apple Developer 账号并做签名 + 公证。
+  要彻底免打扰就得买 Apple Developer 账号并做签名 + 公证；
+* **架构**：Homebrew 的 Python 与 Tcl/Tk 都是单架构（Apple Silicon 上是 arm64），所以产物是 `arm64`；
+  想同时支持 Intel 就得用 universal2 的解释器（python.org 官方安装包是 universal2 的：
+  `PYTHON=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12 ./desktop/build/build_macos.sh --arch=universal2`）。
 
 ---
 
@@ -174,13 +182,14 @@ python -m quantstudio_desktop --view market    :: 指定启动页（market/strat
 |---|---|---|
 | `.github/workflows/test.yml` | push / PR | Linux 上跑核心测试（3.9/3.11/3.12）+ 策略规范校验 + `compileall`；另有 xvfb 下的桌面测试与 GUI 自检（不阻塞） |
 | `.github/workflows/build-desktop.yml` | push 到 main/master、打 `v*` 标签、PR、手动触发 | 先跑核心测试与**桌面测试（161 项）** → 在 **windows-latest** 用 PyInstaller 打包 onedir + onefile → **对产物跑真实自检** → 上传制品 → 打标签时发布 Release |
-| `.github/workflows/build-macos.yml` | 手动触发、打 `v*` 标签 | 在 **macos-14** 上跑 `desktop/build/build_macos.sh`：构建 universal2 `.app` → ad-hoc 签名 → 校验 `Info.plist`/架构/dmg 可挂载 → 上传制品；打标签时用 `gh release upload` 把 zip/dmg **附加**到 Release（不覆盖正文） |
+| `.github/workflows/build-macos.yml` | 手动触发、打 `v*` 标签 | 在 **macos-14** 上用 **Homebrew `python-tk@3.12`（自带 Tcl/Tk 9）** 跑 `desktop/build/build_macos.sh`：构建 `.app`（Tcl/Tk 打进包）→ ad-hoc 签名 → 校验 `Info.plist`/架构/**包内是否含 Tcl/Tk**/dmg 可挂载 → 上传制品；打标签时用 `gh release upload` 把 zip/dmg **附加**到 Release（不覆盖正文） |
 
-关于 macOS 工作流的一个坑：GitHub 的 macOS runner 偶发「镜像用户态比内核新」，导致**系统 Tk 8.5 无法加载**
-（日志里是 `macOS 14 (1408) or later required, have instead 14 (1406)` → `Abort trap: 6`）。
-所以工作流会先探测 `tkinter.Tk()` 能否创建窗口：能就全跑自检，不能就自动加 `--skip-tests`，
-只验证「能构建 + 包结构正确」，并用 `::warning::` 说明——**这是 runner 环境问题，不是产物问题**；
-运行期验证以本机（真实 macOS）为准，见上面的「方式 D」。
+关于 macOS 工作流的一个坑：**系统自带的 Tk 8.5.9 不能用** —— 它在本机 macOS 10.14+ 上会把窗口画成全白
+（v1.4.0 的坑），在 GitHub runner 上更直接（`macOS 14 (1408) or later required, have instead 14 (1406)` → `Abort trap: 6`）。
+所以工作流第一步就是装 Homebrew 的 `python-tk@3.12` 并用它打包，Tcl/Tk 9 会被打进 `.app`；
+构建后还会断言「包内确实有 Tcl/Tk」，没有就直接报错——避免再发一个白屏包出去。
+另外工作流会探测 `tkinter.Tk()` 能否创建窗口：不能就自动加 `--skip-tests` 只做「能构建 + 包结构正确」的验证，
+并用 `::warning::` 说明。
 
 ### 取回编译结果
 
@@ -237,6 +246,8 @@ git tag v1.0.0 && git push origin v1.0.0
 | 数据想换个位置/做成便携版 | 设 `QUANTSTUDIO_DATA_DIR=D:\qs-data` 再启动 |
 | 想确认这台机器能不能跑 | 命令行加 `--selftest`，看退出码与 `%TEMP%\quantstudio_selftest.txt` |
 | 界面字号太小/太大 | 调整 Windows 显示缩放（Tk 会跟随系统 DPI），或改 `theme.init(root, base_size=…)` |
+| **macOS：窗口打开是全白**（标题栏正常、内容空白） | 用了 Apple 随系统的 Tk 8.5.9（2009 年），它在 macOS 10.14+ 上首次映射窗口时可能一帧都不画。验：`/usr/bin/python3 -c "import tkinter;print(tkinter.TkVersion)"` → `8.5`。修：用自带 Tcl/Tk ≥ 8.6 的解释器重新打包（`brew install python-tk@3.12`，再 `PYTHON="$(brew --prefix python@3.12)/bin/python3.12" ./desktop/build/build_macos.sh`），或用 v1.4.1+ 的 Release 包（Tcl/Tk 已打进 `.app`） |
+| macOS：提示「无法打开，因为它来自身份不明的开发者」 | 未做开发者签名/公证：右键 →「打开」→ 再点「打开」，或 `xattr -dr com.apple.quarantine /Applications/QuantTradingStudio.app` |
 
 ---
 

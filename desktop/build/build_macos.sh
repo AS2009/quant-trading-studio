@@ -30,7 +30,8 @@ WORK_DIR="${OUT_DIR}/work"
 PKG_DIR="${OUT_DIR}/pkg"
 APP_PATH="${DIST_DIR}/${APP_NAME}.app"
 REPORT_FILE="${TMPDIR:-/tmp}quantstudio_selftest.txt"
-ARCH="${QUANTSTUDIO_MACOS_ARCH:-universal2}"
+#: 目标架构：auto（按解释器判定：Homebrew/官方单架构 → 本机架构；universal2 解释器 → universal2）
+ARCH="${QUANTSTUDIO_MACOS_ARCH:-auto}"
 
 MAKE_DMG=1
 MAKE_ZIP=1
@@ -54,8 +55,9 @@ for arg in "$@"; do
   esac
 done
 case "${ARCH}" in
+  auto) ARCH="" ;;                       # 下面按解释器判定
   universal2|arm64|x86_64) ;;
-  *) echo "不支持的 --arch=${ARCH}（可用：universal2 / arm64 / x86_64）" >&2; exit 2 ;;
+  *) echo "不支持的 --arch=${ARCH}（可用：auto / universal2 / arm64 / x86_64）" >&2; exit 2 ;;
 esac
 
 step() { printf '\n==== %s\n' "$1"; }
@@ -72,14 +74,33 @@ echo "仓库根目录 : ${REPO_ROOT}"
 echo "平台       : $(uname -s) $(uname -m) / macOS $(sw_vers -productVersion 2>/dev/null || echo '?')"
 echo "解释器     : ${PYTHON}"
 "${PYTHON}" -c 'import sys; print("Python     :", sys.version.split()[0])'
-"${PYTHON}" -c 'import tkinter; print("tkinter    : 可用（Tk %s）" % tkinter.TkVersion)' \
-  || die "该 Python 没有 tkinter：请用 /usr/bin/python3（Xcode 自带 Tk）或 python.org 安装包"
+echo "Tk         : $("${PYTHON}" -c 'import tkinter; print("%s（Tcl %s）" % (tkinter.TkVersion, tkinter.TclVersion))' 2>/dev/null || echo 缺失)"
+"${PYTHON}" -c 'import tkinter' 2>/dev/null \
+  || die "该 Python 没有 tkinter：macOS 上推荐 Homebrew 的 python-tk@3.12（自带 Tcl/Tk 8.6/9，会被打进 .app）或 python.org 安装包；/usr/bin/python3 只有系统 Tk 8.5"
 command -v iconutil >/dev/null 2>&1 || die "找不到 iconutil（属 Xcode 命令行工具）：xcode-select --install"
 command -v codesign >/dev/null 2>&1 || die "找不到 codesign（属 Xcode 命令行工具）：xcode-select --install"
 "${PYTHON}" -c 'import PyInstaller' >/dev/null 2>&1 \
   || die "该 Python 未安装 PyInstaller：${PYTHON} -m pip install -r requirements-desktop.txt"
 "${PYTHON}" -m PyInstaller --version | sed 's/^/PyInstaller : /'
-echo "目标架构   : ${ARCH}"
+
+# 架构：默认按解释器判定 —— Homebrew/单架构解释器只能出本机架构；只有 universal2 解释器才能出通用二进制
+if [ -z "${ARCH}" ]; then
+  PY_REAL="$("${PYTHON}" -c 'import sys; print(sys.executable)' 2>/dev/null || echo "${PYTHON}")"
+  PY_ARCHS="$(lipo -archs "${PY_REAL}" 2>/dev/null || echo unknown)"
+  case "${PY_ARCHS}" in
+    *x86_64*arm64*|*arm64*x86_64*) ARCH="universal2" ;;
+    *) ARCH="$(uname -m)" ;;
+  esac
+  echo "架构       : ${ARCH}（按解释器判定：${PY_ARCHS}；可用 --arch= 覆盖）"
+else
+  echo "架构       : ${ARCH}（--arch 指定）"
+fi
+
+# Tk 8.5 是 2009 年的老版本，在 macOS 10.14+ 上可能整窗不绘制（白屏）——提醒换新 Tk，但不阻断
+if [ "$("${PYTHON}" -c 'import tkinter; print(tkinter.TkVersion)' 2>/dev/null || echo 0)" = "8.5" ]; then
+  note "[警告] 当前解释器用的是系统 Tk 8.5：macOS 14+ 上可能白屏，建议改用自带 Tcl/Tk ≥ 8.6 的解释器"
+  note "       例如：brew install python-tk@3.12 && PYTHON=\$(brew --prefix python@3.12)/bin/python3.12 \$0"
+fi
 
 if [ "${CLEAN}" = "1" ] && [ -d "${OUT_DIR}" ]; then
   echo "清理       : ${OUT_DIR}"

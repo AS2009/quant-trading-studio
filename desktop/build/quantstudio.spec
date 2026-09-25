@@ -62,9 +62,10 @@ for _path in (_APP_MAIN, _BACKEND_DIR, _DESKTOP_DIR):
 # macOS 产物是 .app；其余平台保持原样（Windows 的 .exe 与 Linux 的裸可执行文件）。
 _IS_MAC = sys.platform == "darwin"
 
-#: macOS 架构：universal2（默认，Intel + Apple Silicon 通用）/ arm64 / x86_64。
-#: 需要"只有一个架构"时可 QUANTSTUDIO_MACOS_ARCH=arm64 覆盖（体积更小）。
-_MAC_ARCH = os.environ.get("QUANTSTUDIO_MACOS_ARCH", "universal2").strip() or "universal2"
+#: macOS 架构：**默认不指定**（PyInstaller 用解释器自己的架构）——
+#: Homebrew 的 python-tk 是单架构，硬要 universal2 会直接报「not a fat binary」；
+#: 想打通用二进制就设 QUANTSTUDIO_MACOS_ARCH=universal2（要求解释器与 Tcl/Tk 都是 fat binary）。
+_MAC_ARCH = os.environ.get("QUANTSTUDIO_MACOS_ARCH", "").strip() or None
 
 #: .app 的 Info.plist 里要写的版本号与反向域名标识
 _BUNDLE_ID = "com.quantstudio.desktop"
@@ -294,7 +295,7 @@ exe = EXE(
     console=False,                    # GUI 程序：不弹控制台窗口
     disable_windowed_traceback=True,  # CI 里不能弹模态错误框（会卡住流水线），异常走退出码
     argv_emulation=False,             # macOS：不劫持命令行参数（--selftest 要能收到）
-    target_arch=(_MAC_ARCH if _IS_MAC else None),   # macOS 默认 universal2（Intel + Apple Silicon 通用）
+    target_arch=(_MAC_ARCH if _IS_MAC else None),   # macOS：默认用解释器架构，可用 QUANTSTUDIO_MACOS_ARCH 指定
     codesign_identity=None,
     entitlements_file=None,
     **_EXE_KWARGS

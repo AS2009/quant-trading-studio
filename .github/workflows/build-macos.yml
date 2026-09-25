@@ -4,6 +4,10 @@ name: build-macos
 #  - 手动 workflow_dispatch：随时出 macOS 包（只上传 artifacts，不动 Release）
 #  - push tag `v*`：构建 .app/.zip/.dmg，并把 zip/dmg **附加**到同名 Release
 #    （用 gh release upload，不覆盖 Windows 任务写的 Release 正文）
+#
+# 关键点：macOS 上**必须**用自带 Tcl/Tk ≥ 8.6 的解释器（这里用 Homebrew 的 python-tk@3.12）。
+# Apple 随系统提供的 Tk 8.5.9（2009 年）在 macOS 10.14+ 上既不绘制（窗口全白，v1.4.0 的坑），
+# 在 runner 上甚至直接 SIGABRT；换成 Homebrew 版本后 Tcl/Tk 会被打进 .app，自包含、渲染正常。
 on:
   workflow_dispatch:
   push:
@@ -18,84 +22,96 @@ concurrency:
 
 jobs:
   build-macos:
-    name: macOS 通用二进制（universal2）
-    # macos-14 = Apple Silicon runner；Xcode 自带的 Python 3.9 是 universal2，
-    # 因此可以在 arm64 机器上打出同时支持 Intel 的 universal2 包。
+    name: macOS .app（自带 Tcl/Tk）
+    # macos-14 = Apple Silicon runner；Homebrew 的 python-tk 是单架构，
+    # 所以产物是 arm64（想打 universal2 需要 universal2 解释器 + universal2 Tcl/Tk）。
     runs-on: macos-14
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: 环境信息（Xcode / Python / Tk）
+      - name: 环境信息（Xcode / Python / 系统 Tk）
         run: |
           sw_vers
           xcode-select -p
           /usr/bin/python3 -V
-          /usr/bin/python3 -c "import tkinter, sys; print('tkinter OK, Tk', tkinter.TkVersion); print(sys.executable)"
-          lipo -info /usr/bin/python3 2>/dev/null || true
+          /usr/bin/python3 -c "import tkinter; print('系统 Tk', tkinter.TkVersion)" || true
 
-      - name: 准备打包依赖（venv + PyInstaller）
+      - name: 准备解释器与打包依赖（Homebrew python-tk → venv + PyInstaller）
         run: |
-          /usr/bin/python3 -m venv .venv-macos
+          set -euo pipefail
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          PY="$(brew --prefix python@3.12 2>/dev/null)/bin/python3.12"
+          if ! "$PY" -c "import tkinter" 2>/dev/null; then
+            echo "安装 python-tk@3.12（自带 Tcl/Tk 9，会被打进 .app）…"
+            brew install python-tk@3.12
+          fi
+          if "$PY" -c "import tkinter" 2>/dev/null; then
+            BASE="$PY"
+          else
+            echo "::warning::brew python-tk 不可用，退回系统 python3（Tk 8.5，macOS 14+ 可能白屏）"
+            BASE="/usr/bin/python3"
+          fi
+          "$BASE" -c "import sys, tkinter; print('打包解释器', sys.executable, '| Python', sys.version.split()[0], '| Tk', tkinter.TkVersion)"
+          "$BASE" -m venv .venv-macos
           .venv-macos/bin/python -m pip install --upgrade pip
           .venv-macos/bin/python -m pip install -r requirements-desktop.txt
           .venv-macos/bin/python -m PyInstaller --version
+          echo "PYTHON=$PWD/.venv-macos/bin/python" >> "$GITHUB_ENV"
 
       - name: 从源码读出桌面版本号
-        id: version
         run: |
-          VERSION="$(.venv-macos/bin/python -c "import re,pathlib; print(re.search(r'^__version__\s*=\s*\"([^\"]+)\"', pathlib.Path('desktop/quantstudio_desktop/__init__.py').read_text(encoding='utf-8'), re.M).group(1))")"
+          VERSION="$("$PYTHON" -c "import re,pathlib; print(re.search(r'^__version__\s*=\s*\"([^\"]+)\"', pathlib.Path('desktop/quantstudio_desktop/__init__.py').read_text(encoding='utf-8'), re.M).group(1))")"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "桌面版本号：${VERSION}"
-      # macOS runner 的系统 Tk 偶尔会因为「镜像用户态比内核新」而无法加载
-      # （实测报错：`macOS 14 (1408) or later required, have instead 14 (1406)` → SIGABRT）。
-      # 那是 runner 环境问题、不是构建问题：探测一下，跑不动就跳过需要 Tk 的运行期自检，
-      # 只做「能否构建 + 包结构是否正确」的验证，并在日志里说清楚。
-      - name: 探测系统 Tk 能否真正加载
+        id: version
+
+      # 万一跑在 Tk 有问题（或没窗口会话）的机器上：探测能否真正创建窗口，
+      # 不能就跳过需要 Tk 的运行期自检，只做「能构建 + 包结构正确」的验证。
+      - name: 探测 Tk 能否真正创建窗口
         id: tk
         run: |
           if .venv-macos/bin/python -c "import tkinter; root = tkinter.Tk(); root.destroy(); print('Tk root OK')"; then
             echo "args=" >> "$GITHUB_OUTPUT"
-            echo "系统 Tk 可正常创建窗口 → 运行期自检全跑"
+            echo "Tk 可正常创建窗口 → 运行期自检全跑"
           else
             echo "args=--skip-tests" >> "$GITHUB_OUTPUT"
-            echo "::warning::本 runner 的系统 Tk 无法加载窗口（runner 镜像问题），跳过运行期自检；产物结构仍会完整校验"
+            echo "::warning::本 runner 的 Tk 无法创建窗口，跳过运行期自检；产物结构仍会完整校验"
           fi
 
       - name: 构建 .app + zip + dmg（含图标、签名、自检）
-        env:
-          PYTHON: ${{ github.workspace }}/.venv-macos/bin/python
-        run: |
-          bash desktop/build/build_macos.sh --clean ${{ steps.tk.outputs.args }}
+        run: bash desktop/build/build_macos.sh --clean ${{ steps.tk.outputs.args }}
 
-      - name: 校验 Info.plist / 架构
+      - name: 校验 Info.plist / 架构 / 自带 Tcl/Tk
         run: |
-          PY=".venv-macos/bin/python"
-          "$PY" desktop/build/check_bundle.py \
-            desktop/build/output-macos/dist/QuantTradingStudio.app \
-            --expect-version "${{ steps.version.outputs.version }}"
+          APP="desktop/build/output-macos/dist/QuantTradingStudio.app"
+          "$PYTHON" desktop/build/check_bundle.py "$APP" --expect-version "${{ steps.version.outputs.version }}"
+          echo "---- 内置 Tcl/Tk（自包含，不依赖系统 8.5）----"
+          ls "$APP/Contents/Frameworks" | grep -iE "tcl|tk" || { echo "::error::包里没有 Tcl/Tk，会退回系统 Tk 8.5（macOS 14+ 白屏）"; exit 1; }
+          echo "---- 包内 Tk 版本 ----"
+          "$APP/Contents/MacOS/QuantTradingStudio" --selftest 2>&1 | grep -E "Tk 版本|ttk 主题" || true
 
       - name: 校验 dmg 可挂载且内含 .app
         run: |
-          DMG="desktop/build/output-macos/pkg/QuantTradingStudio-macos-universal2.dmg"
-          # 用显式挂载点：卷名里带空格（"QuantTrading Studio"），解析 hdiutil 输出容易截断
+          DMG="$(ls desktop/build/output-macos/pkg/*.dmg)"
           MOUNT="${RUNNER_TEMP:-/tmp}/quantstudio-dmg"
           mkdir -p "$MOUNT"
+          # 卷名里带空格，用显式挂载点最稳
           hdiutil attach -nobrowse -readonly -mountpoint "$MOUNT" "$DMG"
           ls -la "$MOUNT"
           test -x "$MOUNT/QuantTradingStudio.app/Contents/MacOS/QuantTradingStudio"
           "$MOUNT/QuantTradingStudio.app/Contents/MacOS/QuantTradingStudio" --help | head -5 \
-            || echo "[警告] 产物 --help 没跑通（runner 的 Tk 限制，不影响包结构结论）"
+            || echo "[警告] 产物 --help 没跑通（不影响包结构结论）"
           hdiutil detach "$MOUNT"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: QuantTradingStudio-macos-universal2
+          name: QuantTradingStudio-macos
           if-no-files-found: error
           path: |
-            desktop/build/output-macos/pkg/QuantTradingStudio-macos-universal2.zip
-            desktop/build/output-macos/pkg/QuantTradingStudio-macos-universal2.dmg
+            desktop/build/output-macos/pkg/*.zip
+            desktop/build/output-macos/pkg/*.dmg
             desktop/build/output-macos/selftest/*.txt
 
       # tag v* → 等 Windows 任务把 Release 建出来，再把 macOS 资产附加上去
@@ -105,12 +121,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          for i in $(seq 1 20); do
+          for i in $(seq 1 30); do
             if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-              gh release upload "$GITHUB_REF_NAME" \
-                desktop/build/output-macos/pkg/QuantTradingStudio-macos-universal2.zip \
-                desktop/build/output-macos/pkg/QuantTradingStudio-macos-universal2.dmg \
-                --clobber
+              gh release upload "$GITHUB_REF_NAME" desktop/build/output-macos/pkg/*.zip \
+                desktop/build/output-macos/pkg/*.dmg --clobber
               echo "已附加 macOS 资产到 $GITHUB_REF_NAME"
               exit 0
             fi

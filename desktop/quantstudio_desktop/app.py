@@ -56,6 +56,8 @@ class DesktopApp(tk.Tk):
         self.select_view(start_view)
         self._tick_clock()
         self._poll_status(first=True)
+        # macOS 上系统自带的 Tk 8.5 有时首帧不绘制（整窗全白，见 _force_first_paint 注释）
+        self.after(80, self._force_first_paint)
 
     # ------------------------------------------------------------------ 布局
     def _center(self, width: int, height: int) -> None:
@@ -64,6 +66,30 @@ class DesktopApp(tk.Tk):
         x = max(0, int((screen_w - width) / 2))
         y = max(0, int((screen_h - height) / 3))
         self.geometry("%dx%d+%d+%d" % (width, height, x, y))
+
+    def _force_first_paint(self) -> None:
+        """macOS + 系统 Tk 8.5：窗口整片空白时，改一次尺寸再改回来逼它重画。
+
+        Apple 随系统提供的 Tk 8.5.9（2009 年）在 macOS 10.14+ 上首次映射窗口时
+        可能一帧都不画（窗口全白，控件其实都在）。轻微改一次窗口几何尺寸会触发
+        Tk 重新计算并经窗口服务器重绘；Tk ≥ 8.6（python.org / Homebrew 版）没这毛病，
+        所以非 macOS 或新 Tk 上直接跳过，避免无谓闪烁。
+        """
+        if sys.platform != "darwin":
+            return
+        try:
+            if float(tk.TkVersion) >= 8.6:
+                return
+            self.update_idletasks()
+            width, height = self.winfo_width(), self.winfo_height()
+            if width <= 1 or height <= 1:       # 还没映射完成，下一拍再试
+                self.after(200, self._force_first_paint)
+                return
+            self.geometry("%dx%d" % (width, height + 1))
+            self.after(40, lambda: self.geometry("%dx%d" % (width, height)))
+            self.lift()
+        except tk.TclError:
+            return
 
     def _build_menu(self) -> None:
         menubar = tk.Menu(self)

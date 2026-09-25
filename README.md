@@ -56,16 +56,17 @@ powershell -ExecutionPolicy Bypass -File desktop\build\build_windows.ps1   :: �
 
 推送代码后 GitHub Actions 会自动编译：`.github/workflows/build-desktop.yml` 在 **windows-latest** 上产出
 onedir + onefile（**对产物跑真实自检**，`--selftest` / `--selftest-gui` 必须 exit 0）；
-`.github/workflows/build-macos.yml` 在 **macos-14** 上产出 universal2 的 `.app` / `.zip` / `.dmg`（ad-hoc 签名）。
-打 `v*` 标签会自动把三种产物附到 Release。
+`.github/workflows/build-macos.yml` 在 **macos-14** 上用 Homebrew `python-tk@3.12` 产出自带 Tcl/Tk 9 的 `.app` / `.zip` / `.dmg`
+（ad-hoc 签名）。打 `v*` 标签会自动把三种产物附到 Release。
 
 macOS 本机打包（需要 Xcode 命令行工具：`iconutil` / `codesign`）：
 
 ```bash
-PYTHON=/usr/bin/python3 ./desktop/build/build_macos.sh        # universal2 + 自检 + zip + dmg
+brew install python-tk@3.12     # 关键：Apple 随系统的 Tk 8.5 在 macOS 10.14+ 上会白屏，必须用 ≥ 8.6
+PYTHON="$(brew --prefix python@3.12)/bin/python3.12" ./desktop/build/build_macos.sh
 ```
 
-产物在 `desktop/build/output-macos/`（`.app` 约 20 MB，`.dmg` 约 8 MB）；未做开发者签名与公证，
+产物在 `desktop/build/output-macos/`（`.app` 约 30 MB，含自带 Tcl/Tk；`.dmg` 约 14 MB）；未做开发者签名与公证，
 别人首次打开需右键 →「打开」，或用 `xattr -dr com.apple.quarantine` 去掉隔离标记。
 完整说明见 **[docs/desktop-gui.md](docs/desktop-gui.md)** 与 **[desktop/build/README.md](desktop/build/README.md)**。
 
