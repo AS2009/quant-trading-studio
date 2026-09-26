@@ -796,7 +796,9 @@ class ApiTestCase(unittest.TestCase):
     # ------------------------------------------------------------------ ② days 边界
 
     def test_11_kline_days_bounds(self):
-        cases = {"0": 1, "-1": 1, "1.5": None, "99999": self.settings.max_kline_days}
+        # days 会被夹到 [1, settings.max_kline_days]；但**实际返回条数还受数据源能提供的长度限制**
+        # （测试用的示例序列从 2023-01-03 起，约 1700+ 根），所以这里断言「不超过上限」而不是「等于上限」。
+        cases = {"0": 1, "-1": 1, "1.5": None}
         for raw, expected in cases.items():
             response = self.client.get("/api/market/kline?code=600519.SH&days=%s" % raw)
             self.assertNotEqual(response.status_code, 500)
@@ -805,6 +807,10 @@ class ApiTestCase(unittest.TestCase):
             else:
                 rows = self.check_envelope(response)["data"]
                 self.assertEqual(len(rows), expected, "days=%s" % raw)
+        rows = self.check_envelope(
+            self.client.get("/api/market/kline?code=600519.SH&days=99999"))["data"]
+        self.assertGreater(len(rows), 1200, "放大上限后应能取到比旧的 1200 根更多")
+        self.assertLessEqual(len(rows), self.settings.max_kline_days)
         bad = self.client.get("/api/market/kline?code=600519.SH&days=abc")
         payload = self.check_json_error(bad, 400)
         self.assertEqual(payload["field"], "days")

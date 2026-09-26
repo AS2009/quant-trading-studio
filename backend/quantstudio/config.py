@@ -107,7 +107,8 @@ class Settings:
     sector_limit: int = field(default_factory=lambda: _env_int("SECTOR_LIMIT", 20))
     # 行情看板默认 K 线天数
     default_kline_days: int = field(default_factory=lambda: _env_int("KLINE_DAYS", 250))
-    max_kline_days: int = field(default_factory=lambda: _env_int("MAX_KLINE_DAYS", 1200))
+    #: 回测单次最多取多少根日线：5000 根 ≈ 20 年（腾讯实测可回溯到 2001 年，单次最多 8 页 × 800 = 6400 根）
+    max_kline_days: int = field(default_factory=lambda: _env_int("MAX_KLINE_DAYS", 5000))
 
     def __post_init__(self) -> None:
         if not self.cache_dir:

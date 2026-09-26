@@ -152,7 +152,8 @@ class BacktestService:
         if adjust != "qfq" and isinstance(data, dict):
             data.setdefault("warnings", [])
             data["warnings"].append(
-                "回测引擎固定使用前复权（qfq）日线，adjust=%s 已忽略" % adjust
+                "回测引擎固定使用前复权（qfq = 乘法前复权：后复权序列缩放到最新真实价）日线，"
+                "adjust=%s 已忽略" % adjust
             )
         self._cache_put(key, data)
         return data
@@ -256,7 +257,8 @@ class BacktestService:
             ),
         )
 
-        # 回测引擎固定使用前复权日线：adjust 仅做参数校验，不混入策略参数（详见 run 的 warnings）
+        # 回测引擎固定使用乘法前复权日线（后复权缩放到最新真实价）：adjust 仅做参数校验，
+        # 不混入策略参数（详见 run 的 warnings）
 
         return BacktestRequest(
             strategy_id=strategy_id,

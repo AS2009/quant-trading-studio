@@ -70,6 +70,11 @@ const BacktestView = {
             </form>
           </div>
 
+          <p class="panel-sub" style="margin:0 0 10px">
+            数据说明：免费源日线一般可回溯到 2000 年代初期（单次最多 5000 根，可用
+            <code>QUANTSTUDIO_MAX_KLINE_DAYS</code> 调大）；被上限截取时会在这里给出提示与实际回测区间。
+          </p>
+
           <div id="bt-warnings"></div>
 
           <div class="panel">
@@ -282,7 +287,7 @@ const BacktestView = {
     c.querySelector("#bt-form-fields").innerHTML = `
       <div class="form-grid">
         ${UI.field({ id: "bt-start", name: "start", label: "起始日期", type: "date", value: f.start, hint: "包含该日" })}
-        ${UI.field({ id: "bt-end", name: "end", label: "结束日期", type: "date", value: f.end, hint: "包含该日" })}
+        ${UI.field({ id: "bt-end", name: "end", label: "结束日期", type: "date", value: f.end, hint: "包含该日；留空 = 最近交易日" })}
         ${UI.field({ id: "bt-cash", name: "cash", label: "初始资金（元）", type: "number", value: f.cash,
           min: 10000, step: 10000, hint: "最小 1 万，默认取系统配置" })}
         ${UI.field({ id: "bt-benchmark", name: "benchmark", label: "基准", type: "select",

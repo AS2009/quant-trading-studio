@@ -21,6 +21,13 @@ DEFAULT_SYMBOL_SLOTS = 4
 MAX_SYMBOL_CHECKS = 40
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+#: 数据边界说明：直接回答「为什么起点填得很早、回测却只从某年开始」
+DATA_RANGE_HINT = (
+    "数据说明：免费源日线一般可回溯到 2000 年代初期（单次最多 5000 根，"
+    "可用环境变量 QUANTSTUDIO_MAX_KLINE_DAYS 调大）；被上限截取时会在下方提示里说明，"
+    "并给出实际回测区间。结束日期留空 = 最近交易日。"
+)
+
 ORIGIN_LABELS = {"builtin": "内置", "local": "本地代码", "user": "自定义"}
 STATUS_LABELS = {"running": "运行中", "paused": "已暂停"}
 
@@ -302,6 +309,10 @@ class BacktestView(BaseView):
         ttk.Label(form, text="基准", style="CardMuted.TLabel").grid(row=4, column=2, sticky="w")
         ttk.Combobox(form, textvariable=self._bench_var, values=BENCHMARKS, state="readonly",
                      width=12).grid(row=4, column=3, sticky="w", padx=(8, 0), pady=2)
+
+        ttk.Label(form, text=DATA_RANGE_HINT, style="CardMuted.TLabel",
+                  wraplength=520, justify="left").grid(
+            row=8, column=1, columnspan=3, sticky="w", padx=(8, 0), pady=(6, 0))
 
         ttk.Label(form, text="滑点（bp）", style="CardMuted.TLabel").grid(row=5, column=0, sticky="w")
         ttk.Entry(form, textvariable=self._slippage_var, width=14).grid(

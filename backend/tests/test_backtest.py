@@ -10,14 +10,16 @@
 
 import math
 import os
+import shutil
 import statistics
 import sys
+import tempfile
 import unittest
 from datetime import date, timedelta
 from typing import Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+from quantstudio.config import Settings  # noqa: E402
 from quantstudio.backtest import (  # noqa: E402
     BacktestEngine,
     SimAccount,
@@ -1016,6 +1018,64 @@ class TestLotSizeWiring(unittest.TestCase):
         self.assertEqual(strategy.sold_qty, buys[0].qty)
         self.assertEqual(sells[0].qty, buys[0].qty)
         self.assertEqual(result.positions, [], "期末不该留下卖不掉的零股")
+
+
+class TestFetchDaysEndEmpty(unittest.TestCase):
+    """取数根数：``end`` 留空 = 「最近交易日」，必须按 ``start`` 算出真实区间。
+
+    历史 bug（v1.4.1 及以前）：``_fetch_days`` 只在 start / end **都填**时才算区间交易日数，
+    end 留空就退化成 ``default_kline_days``（250 根 ≈ 一年）——用户填的起始日期被整个丢掉，
+    现象是「不管起点填多早，回测都只从最近一年开始」。下面这些断言把它钉死。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="qts-fetchdays-")
+        self.provider = FakeProvider(days=500)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _engine(self, **settings_kwargs):
+        settings = Settings(data_dir=self.tmp, cache_dir=os.path.join(self.tmp, "cache"),
+                            **settings_kwargs)
+        return BacktestEngine(self.provider, settings=settings)
+
+    def _request(self, start, end=""):
+        return BacktestRequest(strategy_id="probe_test", symbols=["600519.SH"],
+                               start=start, end=end, initial_cash=1_000_000.0)
+
+    def test_empty_end_keeps_start_span(self):
+        engine = self._engine(max_kline_days=5000)
+        start = (date.today() - timedelta(days=365 * 6)).isoformat()
+        span, days, capped = engine._fetch_days(self._request(start), warmup=60)
+        self.assertGreater(span, 1200, "6 年区间应算出上千个交易日（不能退化成 250 根）")
+        self.assertGreaterEqual(days, span + 60, "请求根数要覆盖整个区间 + 预热")
+        self.assertFalse(capped, "5000 根上限下，6 年区间不该被截断")
+
+    def test_empty_end_matches_explicit_today(self):
+        engine = self._engine(max_kline_days=5000)
+        start = (date.today() - timedelta(days=365 * 4)).isoformat()
+        span_empty, _, _ = engine._fetch_days(self._request(start, ""), warmup=60)
+        span_today, _, _ = engine._fetch_days(self._request(start, date.today().isoformat()),
+                                              warmup=60)
+        self.assertLessEqual(abs(span_empty - span_today), 3,
+                             "end 留空 ≈ end=今天（最多差一个周末/节假日）")
+
+    def test_cap_marks_capped(self):
+        engine = self._engine(max_kline_days=300)
+        start = (date.today() - timedelta(days=365 * 10)).isoformat()
+        span, days, capped = engine._fetch_days(self._request(start), warmup=60)
+        self.assertTrue(capped, "10 年区间在 300 根上限下必然被截断")
+        self.assertEqual(days, 300, "被截断时按上限取")
+        self.assertGreater(span, 300)
+
+    def test_short_range_not_capped(self):
+        engine = self._engine(max_kline_days=5000)
+        start = (date.today() - timedelta(days=200)).isoformat()
+        span, days, capped = engine._fetch_days(self._request(start), warmup=60)
+        self.assertFalse(capped)
+        self.assertLess(span, 200, "200 个自然日内的交易日数必然小于 200")
+        self.assertGreaterEqual(days, 60, "至少要有预热带宽")
 
 
 if __name__ == "__main__":

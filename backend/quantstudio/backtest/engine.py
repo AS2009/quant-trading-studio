@@ -25,6 +25,7 @@
 """
 
 import bisect
+import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..config import Settings, get_settings
@@ -264,6 +265,7 @@ class BacktestEngine:
         if capped:
             warnings.append(
                 "区间交易日 %d 天 + 预热 %d 天 超过 settings.max_kline_days=%d，已按上限截取"
+                "（可设环境变量 QUANTSTUDIO_MAX_KLINE_DAYS 调大；腾讯日线实测最多约 6400 根）"
                 % (span, warmup, self.settings.max_kline_days)
             )
 
@@ -453,11 +455,24 @@ class BacktestEngine:
         raise ValidationError("未指定任何标的：请在请求或策略中给出 symbols", field="symbols")
 
     def _fetch_days(self, request: BacktestRequest, warmup: int) -> Tuple[int, int, bool]:
-        """返回 ``(区间交易日数, 请求天数, 是否被 max_kline_days 截断)``。"""
+        """返回 ``(区间交易日数, 请求天数, 是否被 max_kline_days 截断)``。
+
+        ``end`` 留空表示「最近交易日」（界面上的默认提示就是这句），这里必须把它补成
+        真实终点再算区间：否则区间交易日数算不出来，会退化成 ``default_kline_days``
+        （默认 250 根 ≈ 一年），**把用户填的起始日期整个丢掉** —— 表现就是「不管起点填多早，
+        回测都只从最近一年开始」。
+        """
         span = 0
-        if request.start and request.end:
+        start = str(request.start or "").strip()
+        end = str(request.end or "").strip()
+        if not end:
             try:
-                span = len(self.calendar.trading_days(request.start, request.end))
+                end = self.calendar.last_trading_day()
+            except Exception:                      # noqa: BLE001 - 日历不可用时退回自然日
+                end = datetime.date.today().isoformat()
+        if start and end:
+            try:
+                span = len(self.calendar.trading_days(start, end))
             except Exception:
                 span = 0
         if span <= 0:
@@ -471,6 +486,9 @@ class BacktestEngine:
         if not code:
             return []
         try:
+            # 固定使用**乘法前复权**日线：`adjust="qfq"` 的口径是「后复权（hfq）序列整体缩放到
+            # 最新真实价」（腾讯的 qfq 是减法复权，深历史会出负价，见 data/tencent.py 的
+            # 「复权口径」）。末根收盘 == 今日真实价，现金 / 手数模拟才与现实同量级。
             raw = self.provider.kline(code, days=days, freq="day", adjust="qfq") or []
         except Exception as exc:  # 单个标的数据失败不影响整体（后续按数据不足处理）
             warnings.append("获取 %s 日线失败：%s" % (code, exc))

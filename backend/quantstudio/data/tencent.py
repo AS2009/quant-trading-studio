@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""腾讯行情 Provider：**真实历史 K 线**（前/后复权日周月线）+ 行业板块 + 实时快照。
+"""腾讯行情 Provider：**真实历史 K 线**（乘法前复权 / 后复权日周月线）+ 行业板块 + 实时快照。
 
 为什么需要它
 ------------
@@ -15,7 +15,9 @@
            ?param={symbol},{period},,{end},{count},{adjust}
 
    - ``symbol`` 与新浪同款：``sh600519`` / ``sz300750`` / ``sh000001``（复用 ``to_sina_symbol``）；
-   - ``period``：``day`` / ``week`` / ``month``；``adjust``：``qfq`` / ``hfq`` / 空表示不复权；
+   - ``period``：``day`` / ``week`` / ``month``；``adjust``：``qfq`` / ``hfq`` / 空表示不复权。
+     **本模块的 ``qfq`` 用的不是腾讯的 qfq**（腾讯 qfq 是减法复权，见下面「复权口径」一节），
+     而是 hfq 序列缩放到最新真实价（真正的乘法前复权）；
    - 响应 ``data[symbol]`` 里键名依次为 ``qfqday`` / ``hfqday`` / ``day``（周/月同理：
      ``qfqweek`` / ``week`` …）。**指数即使请求 qfq 也返回 ``day``**，所以解析时按
      ``{adjust}{period}`` → ``{period}`` 的顺序取键。
@@ -24,11 +26,37 @@
      → open=1259.00 / close=1252.57 / high=1259.95 / low=1250.80 / volume=25017 手。
    - 单次请求上限实测 800 根（``count=800`` 返回 801 根含边界，``count>=900`` 会被服务端截到
      ~640 根），因此实现为「每次请求 ``min(剩余, 800)`` 根 + 用 ``end`` 往前翻页」，
-     最多翻 :data:`TencentProvider.MAX_REQUESTS` 次（默认 3 → 约 2400 根）后截断；
-     需要更多历史请自行提高该常量或改走 CSV 数据源。
+     最多翻 :data:`TencentProvider.MAX_REQUESTS` 次（默认 8 → 约 6400 根）后截断。
+     **实测可回溯到 2001-08-27**（600519：8 页共 6012 根，第 8 页只剩 412 根，
+     说明服务端再往前就没有了），即约 25 年日线；需要更多请提高该常量或改走 CSV 数据源。
    - K 线不返回成交额 → ``amount_yi=0``；``change_pct`` 由相邻收盘自算（合并后整体计算，首根为 0）；
      ``volume_wan = 手 / 1e4``（个股 / ETF / 沪深指数在腾讯口径下**统一是手**）。
    - ``data[symbol].qt[symbol]`` 里同时带实时快照，解析时会顺手记住名称。
+
+复权口径（**重要**，别改回腾讯 qfq）
+-----------------------------------
+- 腾讯的 ``qfq`` 是**减法复权**：老价格 = 当下价 - 历史累计复权额，深历史会被减到趋近 0
+  甚至负数。实测 600519.SH 取 5000 根（2005-11-21 → 2026-09-24）：``adjust="qfq"`` 首根收盘
+  **-304.77**、**2516 天非正价**、单日涨跌幅最坏 **-1147%** —— 完全不可用。注意 1200 根以内
+  看着正常（减法项还小），所以短区间不暴露，只有长历史才会炸。
+- 腾讯的 ``hfq`` 是**乘法复权**，同一段日历干净：首根 88.14、末根 8764.86、最大单日 9.87%、
+  非正价 0 天（同样是 600519 的 5000 根）。
+- 所以本模块的 ``adjust="qfq"`` = **hfq 序列整体缩放到最新真实价**（真正的乘法前复权）：
+  翻页取数用 ``hfq`` 前缀，再额外请求一次最新**不复权**收盘 ``raw_last``
+  （``adjust="none"`` + ``days=1``，同 symbol / freq，共 1 次额外请求），令
+  ``k = raw_last / hfq_last_close``，把该序列里所有价格字段（开 / 收 / 高 / 低）乘 ``k`` 后再交给
+  :meth:`TencentProvider._build_bars`：``change_pct`` 由缩放后的相邻收盘自动重算，
+  **百分比与 hfq 完全一致**（乘正常数不改变相邻比值），``volume`` 不受影响。结果保证
+  **最后一根收盘 == raw_last**（今日真实价，现金 / 手数模拟才与现实同量级）、**所有价格 > 0**、
+  **单日涨跌幅与 hfq 逐项一致**。
+- 换成这套口径后实测（同一支 600519、同样 5000 根）：``qfq`` 首根 **12.44**、末根 **1237.00**
+  （= 今日真实价）、最大单日 **9.87%**、非正价 **0** 天 —— 百分比与 hfq 完全一致。
+- ``adjust="hfq"`` 语义不变（直接返回后复权原值）；``adjust="none"`` 语义不变（不复权原值），
+  但 ``none`` 有**除权假跳**（实测 600519 最大单日 **-56.69%** 其实是当天除权），
+  直接拿来回测会把除权当成暴跌，**不建议**。
+- 指数（如 ``sh000001``）没有复权键，响应给的是 ``day``：此时**不做缩放**（k=1）原样返回；
+  ``raw_last`` 取不到（网络 / 响应异常 / 非正价）或 ``hfq_last_close`` 非正时同样跳过缩放，
+  保证数据始终可用（只是退回未缩放的 hfq 原值）。
 
 2. 行业板块::
 
@@ -80,7 +108,7 @@
 
 import datetime
 import re
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..core.errors import (
     DataSourceError,
@@ -120,8 +148,9 @@ class TencentProvider(BaseHTTPProvider):
 
     #: 单次 K 线请求最大根数（实测 800；再大服务端会截到约 640）
     BARS_PER_REQUEST = 800
-    #: 最多翻页请求次数（3 × 800 ≈ 2400 根，超过截断）
-    MAX_REQUESTS = 3
+    #: 最多翻页请求次数（8 × 800 = 6400 根 ≈ 25 年；实测 600519 能回到 2001-08-27）
+    #: 每翻一页多一次 HTTP 请求（本机实测 3 页约 0.7s），所以只在用户要求长区间时才会走到后面几页。
+    MAX_REQUESTS = 8
     #: 单次快照最大标的数
     BATCH_SIZE = 60
     #: 抓满全部行业板块（实测 31 个）所需的最少条数
@@ -139,7 +168,12 @@ class TencentProvider(BaseHTTPProvider):
 
     # ================================================================== K 线
     def kline(self, symbol: str, days: int = 250, freq: str = "day", adjust: str = "qfq") -> List[Bar]:
-        """历史 K 线（按日期升序，最多 ``days`` 根；超长自动往前翻页）。"""
+        """历史 K 线（按日期升序，最多 ``days`` 根；超长自动往前翻页）。
+
+        ``adjust="qfq"`` 返回**乘法前复权**：先按 ``hfq`` 取数，再整体缩放到最新真实价
+        （见模块 docstring「复权口径」），所以最后一根收盘 == 今日真实价、所有价格 > 0、
+        单日涨跌幅与 ``hfq`` 版本逐项一致。
+        """
         try:
             code = sym.normalize(symbol)
         except SymbolNotFound as exc:
@@ -159,10 +193,15 @@ class TencentProvider(BaseHTTPProvider):
 
         tx_symbol = self._code_to_sina(code)
         period = self.FREQ_PERIOD[freq_key]
-        prefix = self.ADJUST_PREFIX[adjust_key]
+        # 腾讯的 qfq 是减法复权（深历史出负价），所以 qfq 也按 hfq 取数，
+        # 拿到序列后再整体缩放到最新真实价（见模块 docstring「复权口径」）。
+        scale_to_latest = adjust_key == "qfq"
+        prefix = self.ADJUST_PREFIX["hfq"] if scale_to_latest else self.ADJUST_PREFIX[adjust_key]
+        hfq_key = "%s%s" % (self.ADJUST_PREFIX["hfq"], period)
 
         merged: Dict[str, List[str]] = {}
         end = ""
+        hit_key = ""
         for _attempt in range(self.MAX_REQUESTS):
             want = min(limit - len(merged), self.BARS_PER_REQUEST)
             if want <= 0:
@@ -170,9 +209,11 @@ class TencentProvider(BaseHTTPProvider):
             param = "%s,%s,,%s,%d,%s" % (tx_symbol, period, end, want, prefix)
             payload = self._get_json(self.KLINE_URL, params={"param": param})
             node = self._node(payload, tx_symbol)
-            rows = self._kline_rows(node, prefix, period)
+            page_key, rows = self._kline_section(node, prefix, period)
             if not rows:
                 break
+            if not hit_key:
+                hit_key = page_key
             for row in rows:
                 if row and row[0]:
                     merged[str(row[0])] = row
@@ -189,19 +230,109 @@ class TencentProvider(BaseHTTPProvider):
         if not merged:
             raise DataSourceError("腾讯未返回 %s 的 K 线数据" % code)
         ordered = [merged[key] for key in sorted(merged)]
+        if scale_to_latest and hit_key == hfq_key:
+            # 只有真的拿到 hfq 序列才缩放：命中 day（指数）或旧 qfq 键时 k=1 原样返回，
+            # 否则会把减法复权的负价一起带出来。
+            ordered = self._scale_to_latest(ordered, tx_symbol, period)
         bars = self._build_bars(ordered)
         if not bars:
             raise DataSourceError("腾讯 K 线解析失败：%s" % code)
         return bars[-limit:]
 
-    @staticmethod
-    def _kline_rows(node: Dict[str, Any], prefix: str, period: str) -> List[List[Any]]:
-        """取 K 线数组：``{adjust}{period}`` → ``{period}``（指数无复权键）。"""
-        for key in ("%s%s" % (prefix, period), period):
+    @classmethod
+    def _kline_section(cls, node: Dict[str, Any], prefix: str,
+                       period: str) -> Tuple[str, List[List[Any]]]:
+        """取 K 线数组，返回 ``(命中的键名, 行列表)``。
+
+        键优先级：``{adjust}{period}``（``hfqday``）→ ``{period}``（``day``：指数即使请求
+        复权也只返回无复权键）→ ``hfq`` 前缀时兜底 ``qfq{period}``（极少数响应只给 qfq 键）。
+
+        命中 ``day`` / ``qfq`` 键时调用方**不做缩放**：那两者不是后复权序列。``qfq`` 键还要
+        过一道 :meth:`_all_positive`——腾讯的 qfq 是减法复权，深历史会把老价格减成负数，
+        遇到这种响应宁可不返回（上层报「未返回 K 线数据」），也不把负数当价格传出去。
+        """
+        keys = ["%s%s" % (prefix, period), period]
+        if prefix == cls.ADJUST_PREFIX["hfq"]:
+            keys.append("qfq%s" % period)
+        for key in keys:
             rows = node.get(key)
-            if isinstance(rows, list) and rows:
-                return [row for row in rows if isinstance(row, (list, tuple))]
-        return []
+            if not isinstance(rows, list) or not rows:
+                continue
+            rows = [row for row in rows if isinstance(row, (list, tuple))]
+            if key.startswith("qfq") and not cls._all_positive(rows):
+                continue
+            return key, rows
+        return "", []
+
+    @classmethod
+    def _all_positive(cls, rows: List[Sequence[Any]]) -> bool:
+        """所有行的收盘都 > 0（腾讯 qfq 的减法复权会把老价格打成 0 / 负数）。"""
+        if not rows:
+            return False
+        for row in rows:
+            if cls._row_close(row) <= 0:
+                return False
+        return True
+
+    def _scale_to_latest(self, rows: List[Sequence[Any]],
+                         tx_symbol: str, period: str) -> List[List[Any]]:
+        """后复权行整体缩放到最新真实价（真正的乘法前复权）。
+
+        缩放系数 ``k = raw_last / hfq_last_close``；``raw_last`` 取不到或末根收盘非正时
+        原样返回（k=1，数据仍可用）。只乘价格字段（开 / 收 / 高 / 低），成交量不动，因此
+        :meth:`_build_bars` 自算的 ``change_pct`` 与 hfq 版本逐项一致。
+        """
+        raw_last = self._latest_raw_close(tx_symbol, period)
+        base = self._row_close(rows[-1]) if rows else 0.0
+        if raw_last <= 0 or base <= 0:
+            return list(rows)
+        factor = raw_last / base
+        if not (factor > 0) or factor == 1.0:
+            return list(rows)
+        scaled: List[List[Any]] = []
+        for row in rows:
+            try:
+                prices = [float(row[1]) * factor, float(row[2]) * factor,
+                          float(row[3]) * factor, float(row[4]) * factor]
+            except (TypeError, ValueError, IndexError):
+                scaled.append(list(row))       # 异常行原样保留（_build_bars 会跳过）
+                continue
+            scaled.append([row[0]] + prices + list(row[5:]))
+        return scaled
+
+    def _latest_raw_close(self, tx_symbol: str, period: str) -> float:
+        """最新**不复权**收盘价（``adjust="none"`` + ``days=1``，1 次额外请求）。
+
+        只认 ``{period}`` 键（``day``）：响应里只有复权键时不用它——qfq 是减法复权、
+        hfq 不是真实价。任何异常都返回 0，让调用方跳过缩放（k=1，数据保持可用）。
+        """
+        try:
+            param = "%s,%s,,,%d,%s" % (tx_symbol, period, 1, self.ADJUST_PREFIX["none"])
+            payload = self._get_json(self.KLINE_URL, params={"param": param})
+            node = self._node(payload, tx_symbol)
+            key, rows = self._kline_section(node, self.ADJUST_PREFIX["none"], period)
+        except Exception:                      # noqa: BLE001 - 缩放是锦上添花，失败就 k=1
+            return 0.0
+        if key != period or not rows:
+            return 0.0
+        newest_date = ""
+        newest_close = 0.0
+        for row in rows:
+            if not row:
+                continue
+            close = self._row_close(row)
+            date = str(row[0])[:10]
+            if close > 0 and date >= newest_date:
+                newest_date, newest_close = date, close
+        return newest_close
+
+    @staticmethod
+    def _row_close(row: Sequence[Any]) -> float:
+        """K 线行第 3 段是收盘（``[日期, 开, 收, 高, 低, 量]``）；缺失 / 非数字返回 0。"""
+        try:
+            return float(row[2])
+        except (TypeError, ValueError, IndexError):
+            return 0.0
 
     @staticmethod
     def _build_bars(rows: List[Sequence[Any]]) -> List[Bar]:
