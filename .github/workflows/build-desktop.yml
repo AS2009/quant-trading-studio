@@ -163,7 +163,25 @@ jobs:
           Invoke-Selftest -Exe "desktop/build/output/dist-onefile/QuantTradingStudio.exe" `
                           -Argument "--selftest" -ReportName "selftest-onefile.txt" -ReportFile $report
 
-      - name: 整理上传产物（zip / exe / 自检报告）
+      - name: 安装 Inno Setup（生成 Windows 安装向导）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          choco install innosetup --no-progress -y
+          $iscc = (Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+                                  "$env:ProgramFiles\Inno Setup 6\ISCC.exe" -ErrorAction SilentlyContinue |
+                   Select-Object -First 1).FullName
+          if (-not $iscc) { throw "没装上 Inno Setup（找不到 ISCC.exe）" }
+          Write-Host "ISCC：$iscc（$((Get-Item $iscc).VersionInfo.ProductVersion)）"
+
+      # 安装包自检：静默安装到临时目录 → 检查开始菜单/卸载登记 → 跑装好后的 --selftest
+      #             → 静默卸载 → 断言程序目录已删、用户数据保留
+      - name: 构建并自检 Windows 安装包（Inno Setup）
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File desktop\build\build_installer.ps1 -SkipBuild
+
+      - name: 整理上传产物（zip / exe / 安装包 / 自检报告）
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -183,18 +201,21 @@ jobs:
           path: |
             desktop/build/output/artifacts/QuantTradingStudio-windows-x64.zip
             desktop/build/output/artifacts/QuantTradingStudio-onefile-windows-x64.exe
+            desktop/build/output/artifacts/QuantTradingStudio-*-Setup.exe
             desktop/build/output/artifacts/*.txt
 
-      # tag v* → 发布 Release（zip + 单文件 exe）
+      # tag v* → 发布 Release（zip + 单文件 exe + 安装包）
       - name: 发布 Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          name: QuantTrading Studio ${{ github.ref_name }} (Windows 桌面版)
+          name: QuantTrading Studio ${{ github.ref_name }} (Windows / macOS 桌面版)
           generate_release_notes: true
           draft: false
           files: |
             desktop/build/output/artifacts/QuantTradingStudio-windows-x64.zip
             desktop/build/output/artifacts/QuantTradingStudio-onefile-windows-x64.exe
+            desktop/build/output/artifacts/QuantTradingStudio-*-Setup.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

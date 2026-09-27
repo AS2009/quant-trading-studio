@@ -19,12 +19,23 @@
 
 ### 方式 A：用编译好的程序（推荐给使用者）
 
-1. 打开仓库的 **Actions → build-desktop**（或 **Releases** 页面），下载 `QuantTradingStudio-windows-x64.zip`；
-2. 解压到任意目录（例如 `D:\QuantTradingStudio`），双击 **`QuantTradingStudio.exe`**；
+**Windows —— 安装包（推荐，最省事）**
+
+1. Releases 页面下载 `QuantTradingStudio-<版本>-Setup.exe`，双击；
+2. 「下一步 → 下一步 → 完成」即可 —— 默认**按当前用户安装、不弹 UAC**，装完自动出现在
+   开始菜单（「QuantTrading Studio」组：主程序 / 安装与数据说明 / 卸载），桌面快捷方式可选；
+3. 想装到 Program Files 供所有用户用：向导第一页选「Install for all users」即可（会请求管理员权限）；
+4. 卸载：开始菜单 →「卸载 QuantTrading Studio」，或 设置 → 应用 →「QuantTrading Studio」。
+   **卸载默认保留用户数据**（交互式会多问一句，默认「否」）。
+
+**Windows —— 免安装（zip / 单文件）**
+
+1. 下载 `QuantTradingStudio-windows-x64.zip`，解压到任意目录（例如 `D:\QuantTradingStudio`），
+   双击 **`QuantTradingStudio.exe`**；
+2. 或下载 `QuantTradingStudio-onefile-windows-x64.exe`（单文件，体积小，首次启动要自解压、稍慢）；
 3. 首次启动会创建数据目录 `%LOCALAPPDATA%\QuantTradingStudio\data`，无需管理员权限。
 
-单文件版 `QuantTradingStudio.exe`（onefile）也在制品里，体积更小，但每次启动要解压到临时目录、首次较慢，
-**推荐用 onedir 目录版**。
+**macOS**：见下面的 [方式 D](#方式-d本机打包-macos-版) 与 Releases 里的 `QuantTradingStudio-macos-arm64.dmg`。
 
 ### 方式 B：从源码运行（推荐给改代码的人）
 
@@ -45,10 +56,6 @@ powershell -ExecutionPolicy Bypass -File desktop\build\build_windows.ps1
 # 只要单文件版；跳过测试（不推荐）
 powershell -ExecutionPolicy Bypass -File desktop\build\build_windows.ps1 -OneFile -SkipTests
 ```
-
-**macOS 版**：`./desktop/build/build_macos.sh` 一键产出 `QuantTradingStudio.app` + `.zip` + `.dmg`（默认按解释器
-架构出包，Homebrew 解释器 → `arm64`）——见 [方式 D](#方式-d本机打包-macos-版)。仅用于本地验证 spec 的旧脚本是
-`desktop/build/build_unix.sh`（不生成 .app / 不签名 / 不打 dmg）。
 
 ### 方式 D：本机打包 macOS 版
 
@@ -79,6 +86,23 @@ bash desktop/build/build_macos.sh --clean --rebuild-icon --skip-tests
 * **架构**：Homebrew 的 Python 与 Tcl/Tk 都是单架构（Apple Silicon 上是 arm64），所以产物是 `arm64`；
   想同时支持 Intel 就得用 universal2 的解释器（python.org 官方安装包是 universal2 的：
   `PYTHON=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12 ./desktop/build/build_macos.sh --arch=universal2`）。
+
+### 方式 E：本机打包 Windows 安装包
+
+```powershell
+# 需要 Inno Setup 6：choco install innosetup -y（或 winget install -e --id JRSoftware.InnoSetup）
+powershell -ExecutionPolicy Bypass -File desktop\build\build_installer.ps1
+
+# 复用已经打好的 onedir 产物 / 跳过安装包自检（不推荐跳）
+powershell -ExecutionPolicy Bypass -File desktop\build\build_installer.ps1 -SkipBuild -SkipVerify
+```
+
+产物：`desktop/build/output/artifacts/QuantTradingStudio-<版本>-Setup.exe`（约 13–14 MB，LZMA2 压缩）。
+
+脚本会做**安装包自检**（这一步才是关键）：静默安装到临时目录 → 检查开始菜单快捷方式与
+「应用和卸载」登记（含版本号）→ 跑**装好后的** `QuantTradingStudio.exe --selftest` →
+静默卸载 → 断言程序目录已删除、而 `%LOCALAPPDATA%\QuantTradingStudio` 用户数据**保留**。
+CI 每次都跑（`build-desktop` 工作流的「构建并自检 Windows 安装包」）。
 
 ---
 
@@ -181,7 +205,7 @@ python -m quantstudio_desktop --view market    :: 指定启动页（market/strat
 | 工作流 | 触发 | 做什么 |
 |---|---|---|
 | `.github/workflows/test.yml` | push / PR | Linux 上跑核心测试（3.9/3.11/3.12）+ 策略规范校验 + `compileall`；另有 xvfb 下的桌面测试与 GUI 自检（不阻塞） |
-| `.github/workflows/build-desktop.yml` | push 到 main/master、打 `v*` 标签、PR、手动触发 | 先跑核心测试与**桌面测试（161 项）** → 在 **windows-latest** 用 PyInstaller 打包 onedir + onefile → **对产物跑真实自检** → 上传制品 → 打标签时发布 Release |
+| `.github/workflows/build-desktop.yml` | push 到 main/master、打 `v*` 标签、PR、手动触发 | 先跑核心测试与**桌面测试（161 项）** → 在 **windows-latest** 用 PyInstaller 打包 onedir + onefile → **对产物跑真实自检** → 用 **Inno Setup** 出安装包并**自检安装包**（静默安装 → 装好后的 `--selftest` → 静默卸载 → 断言用户数据保留）→ 上传制品（zip / 单文件 exe / Setup.exe）→ 打标签时发布 Release（三种产物都附上） |
 | `.github/workflows/build-macos.yml` | 手动触发、打 `v*` 标签 | 在 **macos-14** 上用 **Homebrew `python-tk@3.12`（自带 Tcl/Tk 9）** 跑 `desktop/build/build_macos.sh`：构建 `.app`（Tcl/Tk 打进包）→ ad-hoc 签名 → 校验 `Info.plist`/架构/**包内是否含 Tcl/Tk**/dmg 可挂载 → 上传制品；打标签时用 `gh release upload` 把 zip/dmg **附加**到 Release（不覆盖正文） |
 
 关于 macOS 工作流的一个坑：**系统自带的 Tk 8.5.9 不能用** —— 它在本机 macOS 10.14+ 上会把窗口画成全白

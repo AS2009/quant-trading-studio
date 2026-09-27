@@ -51,11 +51,17 @@ python scripts/fetch_data.py --export-csv          # 导出离线 CSV（断网�
 cd desktop
 python -m quantstudio_desktop                    :: 从源码启动
 python -m quantstudio_desktop --selftest         :: 无界面自检（数据源/策略/回测，退出码 0/1）
-powershell -ExecutionPolicy Bypass -File desktop\build\build_windows.ps1   :: 本机打包 exe
+powershell -ExecutionPolicy Bypass -File desktop\build\build_windows.ps1     :: 本机打包 exe（zip / 单文件）
+powershell -ExecutionPolicy Bypass -File desktop\build\build_installer.ps1  :: 本机打包安装向导（需 Inno Setup 6）
 ```
 
+Windows 使用者最省事的是 **安装包**：下载 `QuantTradingStudio-<版本>-Setup.exe`，下一步→下一步→完成，
+开始菜单 / 桌面快捷方式 / 卸载项齐活；默认按当前用户安装（不弹 UAC），**卸载默认保留用户数据**。
+不想安装就用 `QuantTradingStudio-windows-x64.zip`（解压即用）或单文件 exe。
+
 推送代码后 GitHub Actions 会自动编译：`.github/workflows/build-desktop.yml` 在 **windows-latest** 上产出
-onedir + onefile（**对产物跑真实自检**，`--selftest` / `--selftest-gui` 必须 exit 0）；
+onedir + onefile + **Inno Setup 安装包**（**都跑真实自检**：产物自检 `--selftest` / `--selftest-gui` 必须 exit 0，
+安装包还会静默装一遍、跑装好后的 `--selftest`、再静默卸载并断言用户数据保留）；
 `.github/workflows/build-macos.yml` 在 **macos-14** 上用 Homebrew `python-tk@3.12` 产出自带 Tcl/Tk 9 的 `.app` / `.zip` / `.dmg`
 （ad-hoc 签名）。打 `v*` 标签会自动把三种产物附到 Release。
 

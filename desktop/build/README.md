@@ -62,6 +62,35 @@ PYTHON=/usr/bin/python3 ./desktop/build/build_unix.sh            # 系统 python
 ./desktop/build/build_unix.sh --onefile --skip-tests --skip-deps
 ```
 
+### Windows 安装包（安装向导：开始菜单 / 桌面快捷方式 / 卸载）
+
+```powershell
+# 一键：确保 onedir 产物 → Inno Setup 编译 Setup.exe → **安装包自检**
+#      （静默安装到临时目录 → 查开始菜单/卸载登记 → 跑装好后的 --selftest → 静默卸载 → 断言数据保留）
+powershell -ExecutionPolicy Bypass -File desktop\build\build_installer.ps1
+
+powershell -ExecutionPolicy Bypass -File desktop\build\build_installer.ps1 -SkipBuild   # 复用已有 onedir
+```
+
+需要 **Inno Setup 6**（`choco install innosetup -y` 或 `winget install -e --id JRSoftware.InnoSetup`）；
+脚本自己找 `ISCC.exe`，找不到会直接把安装命令打出来。产物：
+`desktop/build/output/artifacts/QuantTradingStudio-<版本>-Setup.exe`。
+
+安装包的行为约定（都在 `desktop/build/installer/quantstudio.iss` 里，改之前先读那段注释）：
+
+| 事项 | 说明 |
+|---|---|
+| 安装位置 | 默认**按当前用户**装（`PrivilegesRequired=lowest`，不弹 UAC）→ `%LOCALAPPDATA%\Programs\QuantTrading Studio`；向导里可切换「为所有用户安装」（会提权，装到 Program Files） |
+| 快捷方式 | 开始菜单「QuantTrading Studio」组：主程序 + 安装与数据说明 + 卸载；另有可选桌面快捷方式（安装时可勾） |
+| 卸载 | Inno 自动登记到「应用和卸载」（图标/版本/发布者齐全）；卸载只删程序目录，**默认保留用户数据**（交互式会多问一句，默认「否」） |
+| 升级 | `AppId` 固定 + `UsePreviousAppDir`：覆盖安装会沿用上次的安装目录 |
+| 编码 | `quantstudio.iss` / `build_installer.ps1` 都是 **UTF-8 带 BOM**（Inno 与 PowerShell 5.1 都要求，否则中文乱码） |
+| 向导语言 | 主界面是 Inno 自带英文（官方没带简体中文语言包），我们自己的字符串（任务说明、启动项、卸载提示）是中文 |
+
+`build_installer.ps1` 的「安装包自检」不是走形式：它真的静默装一遍、跑装好后的 `--selftest`、
+再静默卸载，并**断言程序目录被删掉而 `%LOCALAPPDATA%\QuantTradingStudio` 还在** ——
+CI 每次都会跑（`build-desktop` 工作流的「构建并自检 Windows 安装包」那一步）。
+
 ### macOS（正式产物：`.app` + zip + dmg）
 
 ```bash
@@ -197,7 +226,7 @@ onedir 无此开销，直接加载同目录 DLL。追求启动速度就发布 on
 
 **Q7. 版本号在哪里改？**
 `desktop/quantstudio_desktop/__init__.py` 的 `__version__`（界面「关于」显示）；
-Windows 文件属性用 `desktop/build/version_info.txt` 的 `filevers/prodvers/(1, 4, 2, 0)` 与
+Windows 文件属性用 `desktop/build/version_info.txt` 的 `filevers/prodvers/(1, 5, 0, 0)` 与
 `FileVersion/ProductVersion`（发布前手动同步，PyInstaller 不做跨文件校验）。
 
 **Q8. `--selftest` 退出码 1 怎么办？**

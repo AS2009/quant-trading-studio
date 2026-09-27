@@ -1,0 +1,43 @@
+﻿QuantTrading Studio —— 安装与数据说明
+=====================================
+
+一、这个程序是什么
+    量化交易工作台（Windows 原生界面，Python + Tkinter 打包成 exe）。
+    功能：真实行情 → 策略 → 回测 → 持仓 → 模拟盘，另有「盘口 / L2」页（五档盘口、逐笔、
+    资金流与 L2 工具箱：大单追踪 / 资金流分时 / 封板状态 / 盘口扫描 / 资金流排行）。
+    **只做模拟盘**：默认不接入任何真实券商，仅供研究与学习。
+
+二、怎么启动
+    1. 开始菜单 →「QuantTrading Studio」；
+    2. 或桌面快捷方式（安装时勾了「创建桌面快捷方式」才有）；
+    3. 或直接双击安装目录里的 QuantTradingStudio.exe。
+
+三、用户数据放在哪（重要）
+    自选池、策略、模拟盘账本、回测缓存都在：
+
+        %LOCALAPPDATA%\QuantTradingStudio\data
+
+    也就是 C:\Users\<你的用户名>\AppData\Local\QuantTradingStudio\data
+    （想换位置：设置环境变量 QUANTSTUDIO_DATA_DIR 指向别的目录再启动。）
+
+    **卸载时默认不会删这些数据** —— 只删程序目录。卸载向导会额外问一句「是否同时删除用户数据」，
+    默认是「否」；静默卸载（/VERYSILENT）一律保留数据。
+
+四、数据来源与边界（免费源，请知悉）
+    * 行情来自公开网页接口（腾讯 / 新浪 / 同花顺），**不是**付费 Level-2；
+    * 日线一般可回溯到 2000 年代初期（单次最多 5000 根，可用环境变量
+      QUANTSTUDIO_MAX_KLINE_DAYS 调大，腾讯实测上限约 6400 根 / 到 2001 年）；
+    * 盘口只有五档快照，逐笔方向是第三方盘口标记（非交易所主动买卖判定）；
+    * 免费源可能限流或临时不可用，程序会退到磁盘缓存并标注来源。
+
+五、卸载
+    开始菜单 →「卸载 QuantTrading Studio」，或
+    设置 → 应用 → 已安装的应用 →「QuantTrading Studio」→ 卸载。
+
+六、命令行参数（安装目录里直接跑 exe 时可用）
+    QuantTradingStudio.exe --selftest        自检（数据源 / 策略 / 回测），退出码 0/1
+    QuantTradingStudio.exe --selftest-gui    构建全部页面后退出（排障用）
+    QuantTradingStudio.exe --mcp             以 MCP 服务器（stdio）运行，供大模型调用
+    QuantTradingStudio.exe --view backtest   直接打开某个页面
+
+更多说明见程序目录下的 docs\ （desktop-gui.md / level2.md / mcp.md …）或仓库主页。
