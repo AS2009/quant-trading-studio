@@ -199,6 +199,7 @@ else {
     }
 
     Write-Host "-> 跑安装后产物自检（同时会创建用户数据目录）"
+    $dataDirExisted = Test-Path $DataDir          # 记下来：本机跑脚本时别把用户自己的数据删了
     Invoke-GuiSelftest -ExePath $installedExe -Argument "--selftest"
     if (-not (Test-Path (Join-Path $DataDir "data"))) {
         Write-Warning "用户数据目录还没出现：$DataDir\data（自检没走到写数据那一步？）"
@@ -216,9 +217,14 @@ else {
     if (-not (Test-Path $DataDir)) { throw "用户数据目录被误删了：$DataDir（卸载默认必须保留）" }
     Write-Host "   用户数据    : 保留 ✅（$DataDir）"
 
-    Write-Host "-> 清理自检残留（临时安装目录 + 自检写入的用户数据）"
+    Write-Host "-> 清理自检残留（临时安装目录；用户数据目录只在本轮才创建时才删）"
     if (Test-Path $TestDir) { Remove-Item -Recurse -Force $TestDir -ErrorAction SilentlyContinue }
-    Remove-Item -Recurse -Force $DataDir -ErrorAction SilentlyContinue
+    if ($dataDirExisted) {
+        Write-Host "   用户数据    : 装前就存在，原样保留（本机跑脚本不会动你自己的数据）"
+    }
+    else {
+        Remove-Item -Recurse -Force $DataDir -ErrorAction SilentlyContinue
+    }
     Write-Host "安装包自检通过 ✅"
 }
 
