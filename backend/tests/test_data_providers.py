@@ -1043,6 +1043,40 @@ class CompositeFallbackTest(unittest.TestCase):
         self.eastmoney.fail = True
         self.tencent.fail = True
         self.ths.fail = True
+
+    # ------------------------------------------------------------- K 线「粘性源」
+    def test_kline_sticky_source_prefers_last_success(self):
+        """主源恢复后仍优先复用上次成功的源，避免跨源复权口径差。"""
+        self.eastmoney.fail = True                       # 东财不可用 → 降级到腾讯
+        self.assertTrue(self.composite.kline("600519.SH", 5))
+        self.assertEqual(self.composite.last_meta.source, "tencent")
+        self.eastmoney.fail = False                      # 东财恢复
+        self.assertTrue(self.composite.kline("600519.SH", 5))
+        self.assertEqual(self.composite.last_meta.source, "tencent",
+                         "主源恢复后不应立刻换源（同一日期会出现两个复权价）")
+
+    def test_kline_sticky_source_expires(self):
+        """超过 KLINE_STICKY_TTL 后粘性失效，重新按链路优先级取主源。"""
+        self.eastmoney.fail = True
+        self.composite.kline("600519.SH", 5)
+        self.assertEqual(self.composite.last_meta.source, "tencent")
+        self.eastmoney.fail = False
+        self.composite.KLINE_STICKY_TTL = 0.0            # 立刻过期
+        self.composite.kline("600519.SH", 5)
+        self.assertEqual(self.composite.last_meta.source, "eastmoney")
+
+    def test_kline_source_switch_records_note(self):
+        """粘性源本次不可用 → 切到链路里下一个源，并在 notes 里如实说明跨源口径差。"""
+        self.eastmoney.fail = True
+        self.composite.kline("600519.SH", 5)
+        self.assertEqual(self.composite.last_meta.source, "tencent")
+        self.eastmoney.fail = False                      # 主源已恢复
+        self.tencent.fail = True                         # 粘性源掉线
+        self.composite.kline("600519.SH", 5)
+        self.assertEqual(self.composite.last_meta.source, "eastmoney")
+        notes = " ".join(self.composite.last_meta.notes)
+        self.assertIn("复权口径", notes)
+
     def test_primary_ok_meta(self):
         quotes = self.composite.latest_quotes(["600519.SH"])
         self.assertEqual(len(quotes), 1)

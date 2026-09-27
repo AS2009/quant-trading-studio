@@ -120,6 +120,10 @@ class CompositeProvider:
 
     name = "composite"
 
+    #: K 线「粘性源」有效期（秒）：同一标的+周期在这段时间内优先复用上次成功的源。
+    #: 不设太长，避免某个源长期故障后还被一直压在第一位；也不设太短，否则一次限流就会
+    #: 让「短窗口走腾讯、长窗口走同花顺」，同一天出现两个价格（见 kline 里的注释）。
+    KLINE_STICKY_TTL = 600.0
     def __init__(
         self,
         settings: Optional[Settings] = None,
@@ -141,6 +145,8 @@ class CompositeProvider:
         self._state: Dict[str, Dict[str, Any]] = {
             label: {"ok": None, "detail": "尚未调用"} for label in CHAIN_LABELS
         }
+        #: K 线粘性源：``(code, freq, adjust) -> (源名, 时间戳)``
+        self._kline_sticky: Dict[Tuple[str, str, str], Tuple[str, float]] = {}
         self.providers: Dict[str, Any] = self._build_providers(providers)
 
     # ================================================================== 构造
@@ -464,9 +470,27 @@ class CompositeProvider:
             raise ValidationError("复权方式仅支持 qfq/hfq/none，当前为 %r" % (adjust,), field="adjust")
 
         key = self._key("kline", [code, limit, freq_key, adjust_key])
-        hit = self._through_primary("history", "kline", (code, limit, freq_key, adjust_key), notes)
+        # K 线「粘性源」：同一标的+周期+复权方式，尽量一直用同一个源。
+        # 原因：不同免费源的「前复权」口径不同（各自的分红因子更新时点不一样，实测同花顺与腾讯
+        # 在 600519 上差约 1%），如果短窗口走腾讯、长窗口因限流降级到同花顺，同一个日期就会
+        # 出现两个价格 —— 图表与回测对不上。粘住成功过的源即可避免这种「窗口一变、价格就变」。
+        sticky_key = (code, freq_key, adjust_key)
+        labels = self._chain("history")
+        previous = self._kline_sticky.get(sticky_key)
+        if previous:
+            label_name, stamp = previous
+            if label_name in labels and (time.time() - stamp) <= self.KLINE_STICKY_TTL:
+                labels = [label_name] + [item for item in labels if item != label_name]
+            else:
+                self._kline_sticky.pop(sticky_key, None)
+                previous = None
+        hit = self._through_labels(labels, "kline", (code, limit, freq_key, adjust_key), notes)
         if hit is not None:
             label, bars = hit
+            if previous and previous[0] != label:
+                notes.append("K 线数据源已从 %s 切到 %s（原源本次不可用）：不同免费源的复权口径"
+                             "可能有细微差异（实测同花顺与腾讯在同一日期差约 1%%）" % (previous[0], label))
+            self._kline_sticky[sticky_key] = (label, time.time())
             self._cache_write(key, bars, self._kline_ttl(bars))
             self._finish(label, started, notes)
             return bars

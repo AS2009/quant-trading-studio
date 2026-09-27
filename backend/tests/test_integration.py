@@ -56,13 +56,31 @@ class TestRealDataPath(unittest.TestCase):
         self.assertTrue(high_low_ok, "K 线 high/low 未包住 open/close")
 
     def test_same_date_stable_across_windows(self):
-        """同一日期在不同 days 请求下价格必须一致（否则回测结果会被窗口长度扭曲）。"""
+        """同一日期在不同 days 请求下价格必须一致（否则回测结果会被窗口长度扭曲）。
+
+        例外：如果两次调用之间换了数据源（主源限流/失败后降级），不同免费源的「前复权」
+        口径本身就有细微差异（实测同花顺与腾讯在 600519 上差约 1%），这时只要求量级一致，
+        并把源名写进失败信息 —— 避免把「源切换」误报成「窗口长度扭曲」。正常情况下
+        ``CompositeProvider`` 的 K 线粘性源会让两次调用落在同一个源上。
+        """
         short = {b.date: b.close for b in self.provider.kline(STOCK, days=20)}
+        short_source = self.provider.last_meta.source
         long_ = {b.date: b.close for b in self.provider.kline(STOCK, days=120)}
+        long_source = self.provider.last_meta.source
+        same_source = bool(short_source) and short_source == long_source
         for date, close in short.items():
             self.assertIn(date, long_, "长窗口缺少短窗口的日期 %s" % date)
-            self.assertAlmostEqual(close, long_[date], places=2,
-                                   msg="同一日期 %s 在两个窗口下价格不同：%.2f vs %.2f" % (date, close, long_[date]))
+            other = long_[date]
+            if same_source:
+                self.assertAlmostEqual(close, other, places=2,
+                                       msg="同一日期 %s 在源 %s 的两个窗口下价格不同：%.2f vs %.2f"
+                                           % (date, short_source, close, other))
+            else:
+                gap = abs(close - other) / close
+                self.assertLess(gap, 0.03,
+                                "两个窗口分别来自不同数据源（%s vs %s），日期 %s 价差 %.2f%% 超出"
+                                "跨源复权口径的合理范围：%.2f vs %.2f"
+                                % (short_source, long_source, date, gap * 100, close, other))
 
     def test_snapshot_matches_kline_tail(self):
         bars = self.provider.kline(STOCK, days=5)
