@@ -1060,8 +1060,10 @@ class CompositeFallbackTest(unittest.TestCase):
         self.eastmoney.fail = True
         self.composite.kline("600519.SH", 5)
         self.assertEqual(self.composite.last_meta.source, "tencent")
-        self.eastmoney.fail = False
-        self.composite.KLINE_STICKY_TTL = 0.0            # 立刻过期
+        self.eastmoney.fail = False                      # 东财恢复
+        # 用负数 TTL 表示「一定过期」：不能写 0 —— Windows 的 time.time() 粒度约 15.6ms，
+        # 两次调用可能落在同一刻度上（diff == 0.0 仍满足 <= 0），粘性就不会失效。
+        self.composite.KLINE_STICKY_TTL = -1.0
         self.composite.kline("600519.SH", 5)
         self.assertEqual(self.composite.last_meta.source, "eastmoney")
 
