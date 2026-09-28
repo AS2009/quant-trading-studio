@@ -487,6 +487,8 @@ class CompositeProvider:
         hit = self._through_labels(labels, "kline", (code, limit, freq_key, adjust_key), notes)
         if hit is not None:
             label, bars = hit
+            for extra in getattr(self.providers.get(label), "last_notes", None) or []:
+                notes.append(extra)            # 数据源自己的口径说明（例如复权末根修正）如实透传
             if previous and previous[0] != label:
                 notes.append("K 线数据源已从 %s 切到 %s（原源本次不可用）：不同免费源的复权口径"
                              "可能有细微差异（实测同花顺与腾讯在同一日期差约 1%%）" % (previous[0], label))

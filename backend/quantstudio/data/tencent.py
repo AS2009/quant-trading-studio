@@ -172,8 +172,9 @@ class TencentProvider(BaseHTTPProvider):
 
         ``adjust="qfq"`` 返回**乘法前复权**：先按 ``hfq`` 取数，再整体缩放到最新真实价
         （见模块 docstring「复权口径」），所以最后一根收盘 == 今日真实价、所有价格 > 0、
-        单日涨跌幅与 ``hfq`` 版本逐项一致。
+        单日涨跌幅与 ``hfq`` 版本逐项一致；万一腾讯后复权末根不自洽，会按原价比例修正并记口径说明。
         """
+        self.last_notes = []                   # 每次调用重置：口径说明只在本次响应里生效
         try:
             code = sym.normalize(symbol)
         except SymbolNotFound as exc:
@@ -282,7 +283,12 @@ class TencentProvider(BaseHTTPProvider):
         原样返回（k=1，数据仍可用）。只乘价格字段（开 / 收 / 高 / 低），成交量不动，因此
         :meth:`_build_bars` 自算的 ``change_pct`` 与 hfq 版本逐项一致。
         """
-        raw_last = self._latest_raw_close(tx_symbol, period)
+        closes = self._recent_raw_closes(tx_symbol, period, 1)
+        raw_last = closes[0] if closes else 0.0
+        base = self._row_close(rows[-1]) if rows else 0.0
+        if raw_last <= 0 or base <= 0:
+            return list(rows)
+        rows = self._repair_last_row(rows, tx_symbol, period)
         base = self._row_close(rows[-1]) if rows else 0.0
         if raw_last <= 0 or base <= 0:
             return list(rows)
@@ -300,31 +306,68 @@ class TencentProvider(BaseHTTPProvider):
             scaled.append([row[0]] + prices + list(row[5:]))
         return scaled
 
-    def _latest_raw_close(self, tx_symbol: str, period: str) -> float:
-        """最新**不复权**收盘价（``adjust="none"`` + ``days=1``，1 次额外请求）。
+    def _repair_last_row(self, rows: List[Sequence[Any]],
+                         tx_symbol: str, period: str) -> List[List[Any]]:
+        """修正后复权序列**最后一根**的不连续（返回新列表；无需修正时返回浅拷贝）。
 
-        只认 ``{period}`` 键（``day``）：响应里只有复权键时不用它——qfq 是减法复权、
-        hfq 不是真实价。任何异常都返回 0，让调用方跳过缩放（k=1，数据保持可用）。
+        背景（实测 sh600519 / 2026-09-24 → 2026-09-28）：不复权 1237.00 → 1236.04（-0.08%），
+        而腾讯 ``hfqday`` 的末根却从 8764.863 掉到 7912.63（**-9.77%**）—— 第三方复权序列
+        自己在末根上不自洽。``hfq × k`` 会把这个假跳原样搬进 qfq，回测里就是一次假暴跌
+        （触发假止损、假成交），所以这里按**原价比例**把它修正回连续。
+
+        判定与代价：末根涨跌幅 ≥5% 才继续查（正常路径**不多发请求**）；再用不复权序列核对，
+        只有「末根 hfq 明显低于 前一根 hfq × 原价涨跌幅」才算坏数据 —— 真除权日只会让
+        **复权**收益高于原价收益，方向相反，因此不会被误修。
+        """
+        original = [list(row) for row in rows]
+        if len(rows) < 2:
+            return original
+        base = self._row_close(rows[-1])
+        prev_close = self._row_close(rows[-2])
+        if base <= 0 or prev_close <= 0 or abs(base / prev_close - 1.0) < 0.05:
+            return original
+        closes = self._recent_raw_closes(tx_symbol, period, 3)
+        if len(closes) < 2:
+            return original
+        raw_now, raw_prev = closes[0], closes[1]
+        if raw_now <= 0 or raw_prev <= 0:
+            return original
+        expected = prev_close * (raw_now / raw_prev)
+        if expected <= 0 or base >= expected * 0.99:
+            return original                     # 正常，或真除权（复权收益更高）
+        ratio = expected / base
+        try:
+            row = rows[-1]
+            fixed = [row[0]] + [float(row[index]) * ratio for index in (1, 2, 3, 4)] + list(row[5:])
+        except (TypeError, ValueError, IndexError):
+            return original
+        original[-1] = fixed
+        self.last_notes.append(
+            "腾讯后复权末根与原价不自洽（%.2f，按原价应为 %.2f）：已按比例修正，避免回测出现假跳"
+            % (base, expected))
+        return original
+
+    def _recent_raw_closes(self, tx_symbol: str, period: str, count: int = 1) -> List[float]:
+        """最近 ``count`` 根**不复权**收盘价（新→旧）；取不到返回空列表。
+
+        只认 ``{period}`` 键（``day``）：响应里只有复权键时不用它 —— qfq 是减法复权、
+        hfq 不是真实价。任何异常都返回空列表，让调用方跳过缩放/修正（数据保持可用）。
         """
         try:
-            param = "%s,%s,,,%d,%s" % (tx_symbol, period, 1, self.ADJUST_PREFIX["none"])
+            param = "%s,%s,,,%d,%s" % (tx_symbol, period, count, self.ADJUST_PREFIX["none"])
             payload = self._get_json(self.KLINE_URL, params={"param": param})
             node = self._node(payload, tx_symbol)
             key, rows = self._kline_section(node, self.ADJUST_PREFIX["none"], period)
-        except Exception:                      # noqa: BLE001 - 缩放是锦上添花，失败就 k=1
-            return 0.0
+        except Exception:                      # noqa: BLE001 - 缩放是锦上添花，失败就跳过
+            return []
         if key != period or not rows:
-            return 0.0
-        newest_date = ""
-        newest_close = 0.0
-        for row in rows:
-            if not row:
-                continue
+            return []
+        closes: List[float] = []
+        for row in reversed(sorted(rows, key=lambda item: str(item[0])[:10])):
             close = self._row_close(row)
-            date = str(row[0])[:10]
-            if close > 0 and date >= newest_date:
-                newest_date, newest_close = date, close
-        return newest_close
+            if close > 0:
+                closes.append(close)
+        return closes
 
     @staticmethod
     def _row_close(row: Sequence[Any]) -> float:

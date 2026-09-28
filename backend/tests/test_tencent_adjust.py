@@ -57,12 +57,13 @@ class _AdjustTencent(TencentProvider):
     """
 
     def __init__(self, settings=None, has_hfq=True, qfq_shift=QFQ_SUBTRACT,
-                 index_only=False, raw_fail=False):
+                 index_only=False, raw_fail=False, broken_last_hfq=False):
         TencentProvider.__init__(self, settings)
         self.has_hfq = bool(has_hfq)          # 响应里有没有 hfq 键
         self.qfq_shift = qfq_shift            # qfq 键的平移量（None = 不返回 qfq 键）
         self.index_only = bool(index_only)    # 只返回 day 键（指数：请求复权也没复权键）
         self.raw_fail = bool(raw_fail)        # 最新不复权收盘请求直接失败
+        self.broken_last_hfq = bool(broken_last_hfq)   # 末根 hfq 人为压低 10%（复刻实测的坏数据）
         #: 每次请求的 ``(prefix, end, count)``
         self.requests = []
 
@@ -89,6 +90,16 @@ class _AdjustTencent(TencentProvider):
         最新一根收盘正好是今天的真实价（实测 600519：hfq 8764.86 / 不复权 1237.00）。"""
         return _AdjustTencent._series_rows(end, count, shift=RAW_LAST - HFQ_LAST)
 
+    @staticmethod
+    def _break_newest(rows, factor=0.9):
+        """把**最新一根**的价格整体压低（复刻实测的腾讯 hfq 末根不自洽：8764.86 → 7912.63）。"""
+        fixed = []
+        for row in rows:
+            if str(row[0])[:10] == NEWEST.isoformat():
+                row = [row[0]] + ["%.3f" % (float(row[index]) * factor) for index in (1, 2, 3, 4)] + list(row[5:])
+            fixed.append(row)
+        return fixed
+
     def _payload(self, tx_symbol, prefix, end, count):
         node = {"qt": {tx_symbol: ["1", "测试标的", tx_symbol[2:]]}}
         if self.index_only:
@@ -96,7 +107,8 @@ class _AdjustTencent(TencentProvider):
             node["day"] = self._series_rows(end, count)
             return {"code": 0, "data": {tx_symbol: node}}
         if self.has_hfq:
-            node["hfqday"] = self._series_rows(end, count)
+            rows = self._series_rows(end, count)
+            node["hfqday"] = self._break_newest(rows) if self.broken_last_hfq else rows
         if self.qfq_shift is not None:
             node["qfqday"] = self._series_rows(end, count, shift=self.qfq_shift)
         if prefix == self.ADJUST_PREFIX["none"]:
@@ -243,6 +255,46 @@ class TencentIndexAndOtherAdjustTest(unittest.TestCase):
         self.assertAlmostEqual(bars[0].close, _hfq_first_close() - (HFQ_LAST - RAW_LAST), places=6)
         self.assertTrue(all(item[0] == "" for item in provider.requests),      # 一律不带复权前缀
                         provider.requests)
+
+class TencentBrokenLastBarTest(unittest.TestCase):
+    """腾讯后复权**末根不自洽**时的修正（实测 sh600519 2026-09-28：原价 -0.08%、hfq -9.77%）。
+
+    不修正的话，``hfq × k`` 会把这个假跳原样搬进 qfq：界面上看是一根假暴跌，回测里会触发
+    假止损/假成交。修正只针对「末根明显低于 前一根 hfq × 原价涨跌幅」这一种形态（真除权日
+    方向相反），并且只在末根出现 ≥5% 波动时才多发 1 次请求去核对原价序列。
+    """
+
+    def setUp(self):
+        self.settings, self.tmp = _tmp_settings()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_broken_last_bar_is_repaired_without_fake_jump(self):
+        provider = _AdjustTencent(self.settings, broken_last_hfq=True)
+        bars = provider.kline("600519.SH", days=TOTAL, adjust="qfq")
+
+        # 末根仍是今日真实价，且与前一根连续（不存在 -10% 的假跳）
+        self.assertAlmostEqual(bars[-1].close, RAW_LAST, places=6)
+        last_move = bars[-1].close / bars[-2].close - 1.0
+        self.assertLess(abs(last_move), 0.01, "末根不应出现假跳：%.4f" % last_move)
+        # 修正结果是「按原价比例」推出来的：末两根的收盘比 == 原价末两根之比
+        self.assertAlmostEqual(bars[-1].close / bars[-2].close,
+                               RAW_LAST / (RAW_LAST - HFQ_STEP), places=6)
+        self.assertTrue(any("不自洽" in note for note in provider.last_notes), provider.last_notes)
+        # 原价请求：1 次取末根 + 1 次取前几根（只在疑似时才发）
+        raw_all = [item for item in provider.requests
+                   if item[0] == provider.ADJUST_PREFIX["none"]]
+        self.assertEqual(sorted(item[2] for item in raw_all), [1, 3], provider.requests)
+
+    def test_normal_last_bar_does_not_add_extra_request(self):
+        provider = _AdjustTencent(self.settings)
+        provider.kline("600519.SH", days=TOTAL, adjust="qfq")
+        raw_all = [item for item in provider.requests
+                   if item[0] == provider.ADJUST_PREFIX["none"]]
+        self.assertEqual(len(raw_all), 1, provider.requests)      # 正常路径只有 1 次原价请求
+        self.assertEqual(provider.last_notes, [])                 # 正常路径不产生口径说明
+
 
 
 if __name__ == "__main__":
