@@ -42,7 +42,12 @@
 #ifndef DataNoteFile
   #define DataNoteFile "安装与数据说明.txt"
 #endif
-
+; 内置示例策略 / 模板的**源码位置**（相对本文件：installer → build → desktop → 仓库根）
+; 装到 {app}\_seed\（不是 strategies\：那里是用户数据，不能被卸载器登记/删除）；
+; 程序首次启动会把它们播种到 strategies\，用户也可以直接复制/改名使用。
+#ifndef SeedSourceDir
+  #define SeedSourceDir "..\..\..\backend\quantstudio\strategies\local"
+#endif
 #define MyAppName "QuantTrading Studio"
 #define MyAppExe "QuantTradingStudio.exe"
 #define MyAppURL "https://github.com/AS2009/quant-trading-studio"
@@ -114,6 +119,9 @@ Name: "{#MyDataDir}\cache"; Permissions: users-modify; Flags: uninsneveruninstal
 ; 打包目录里若残留了自检跑出来的数据，绝不能跟着安装包发出去）
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "data\*,strategies\*"
 Source: "{#DataNoteFile}"; DestDir: "{app}"; Flags: ignoreversion
+; 内置示例策略 / 模板 → {app}\_seed\（程序首次启动播种到 strategies\；_seed 是程序文件，
+; 卸载时跟着走，而 strategies\ 是用户数据，卸载默认保留）
+Source: "{#SeedSourceDir}\*.py"; DestDir: "{app}\_seed"; Excludes: "__init__.py"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; WorkingDir: "{app}"

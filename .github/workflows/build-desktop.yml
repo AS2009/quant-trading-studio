@@ -192,6 +192,13 @@ jobs:
           # 别把 CI 跑出来的缓存/自选池/播种策略混进发行 zip（用户首次启动会自己生成）
           $distDir = "desktop/build/output/dist/QuantTradingStudio"
           Remove-Item -Recurse -Force "$distDir\data", "$distDir\strategies" -ErrorAction SilentlyContinue
+          # 示例策略随包发（Windows 上 PyInstaller 的 datas 实测不落盘）：复制进产物 _seed\，
+          # 首次启动由程序播种到 strategies\（_seed 是程序文件，strategies\ 才是用户数据）
+          $seedDst = Join-Path $distDir "_seed"
+          New-Item -ItemType Directory -Force -Path $seedDst | Out-Null
+          Get-ChildItem "backend/quantstudio/strategies/local" -Filter *.py |
+              Where-Object { $_.Name -ne "__init__.py" } | Copy-Item -Destination $seedDst -Force
+          Write-Host ("示例策略: {0} 个 .py → {1}" -f @(Get-ChildItem $seedDst -Filter *.py).Count, $seedDst)
           Compress-Archive -Path "desktop/build/output/dist/QuantTradingStudio" `
                            -DestinationPath "$artifacts/QuantTradingStudio-windows-x64.zip" -Force
           Copy-Item "desktop/build/output/dist-onefile/QuantTradingStudio.exe" `
