@@ -174,6 +174,24 @@ foreach ($item in $specs) {
     )
 }
 
+# ---- 内置示例策略 / 模板：放进产物里的 _seed\，首次启动由程序播种到 strategies\
+# 为什么不用 PyInstaller 的 datas：Windows onedir 实测不落盘（CI 上 ``_internal\quantstudio\
+# strategies\local`` 不存在，macOS 的包里有），而示例策略要「复制进去就能用」就得确定性地随包发。
+# 放在 _seed\ 而不是直接放 strategies\：strategies\ 是**用户数据**，不能被卸载器登记/删除。
+$seedSrc = Join-Path $RepoRoot "backend\quantstudio\strategies\local"
+$seedDst = Join-Path (Join-Path $DistOnedir "QuantTradingStudio") "_seed"
+if (Test-Path $seedSrc) {
+    New-Item -ItemType Directory -Force -Path $seedDst | Out-Null
+    Get-ChildItem $seedSrc -Filter *.py | Where-Object { $_.Name -ne "__init__.py" } |
+        Copy-Item -Destination $seedDst -Force
+    $seedCount = @(Get-ChildItem $seedDst -Filter *.py).Count
+    Write-Host ("示例策略    : {0} 个 .py → {1}" -f $seedCount, $seedDst)
+    if ($seedCount -lt 1) { throw "没有把内置示例策略放进产物（$seedSrc 里没有 .py？）" }
+}
+else {
+    Write-Warning "找不到内置示例策略目录：$seedSrc"
+}
+
 # =========================================================================== 5. 产物自检
 Write-Step "5/6 产物自检（关键）"
 $exe = Join-Path $DistOnedir "QuantTradingStudio\QuantTradingStudio.exe"
@@ -195,4 +213,4 @@ if ($OneFile) {
 }
 Write-Host ""
 Write-Host "打包完成 ✅  双击 onedir 里的 QuantTradingStudio.exe 即可运行（首次启动稍慢）。" -ForegroundColor Green
-Write-Host "数据目录：%LOCALAPPDATA%\QuantTradingStudio\data（可用环境变量 QUANTSTUDIO_DATA_DIR 覆盖）。"
+Write-Host "用户数据：就在程序目录下（strategies\ 放策略、data\{csv,level2} 放导入文件；卸载默认保留）。"

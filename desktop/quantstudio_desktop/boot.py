@@ -188,9 +188,14 @@ def core_strategies_candidates() -> List[str]:
         pass
     roots = [item for item in (ensure_core_path(), getattr(sys, "_MEIPASS", "")) if item]
     for root in roots:
-        add(os.path.join(root, "quantstudio", "strategies", "local"))
-        add(os.path.abspath(os.path.join(root, os.pardir, "Resources",
-                                         "quantstudio", "strategies", "local")))
+        for relative in (("quantstudio", "strategies", "local"), ("_seed",)):
+            add(os.path.join(root, *relative))
+            # macOS .app：数据文件可能在 Contents/Resources（_MEIPASS 指向 Contents/Frameworks）
+            add(os.path.abspath(os.path.join(root, os.pardir, "Resources", *relative)))
+    program = program_dir()
+    if program:
+        # Windows 安装版：构建脚本把示例策略放进产物 _seed（PyInstaller datas 在 Windows 不落盘）
+        add(os.path.join(program, "_seed"))
     return candidates
 
 

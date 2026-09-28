@@ -224,6 +224,26 @@ class BootLayoutTest(unittest.TestCase):
         self.assertEqual(second["data_dir"], os.path.join(program, "data"))
         self.assertEqual(second["strategies_dir"], os.path.join(program, "strategies"))
 
+    def test_program_seed_folder_is_used(self):
+        """Windows 安装版：示例策略随包放在程序目录的 ``_seed`` 文件夹里。
+
+        为什么单独测：PyInstaller 的 datas 在 Windows onedir 里实测不落盘（macOS 的包里有），
+        所以构建脚本把示例复制进产物 ``_seed``，程序从那里播种。这里只留 ``_seed`` 一个候选，
+        确认播种真的用它。
+        """
+        program = self._mk("qs-install-")
+        seed_dir = os.path.join(program, "_seed")
+        os.makedirs(seed_dir, exist_ok=True)
+        self._write(os.path.join(seed_dir, "demo_sample.py"), "# 示例\n")
+        self._frozen(program)
+        self.assertIn(seed_dir, boot.core_strategies_candidates())
+        with mock.patch.object(boot, "core_strategies_candidates", return_value=[seed_dir]):
+            resolved = boot.prepare_dirs()
+        seeded = sorted(name for name in os.listdir(os.path.join(program, "strategies"))
+                        if name.endswith(".py"))
+        self.assertEqual(seeded, ["demo_sample.py"])
+        self.assertEqual(resolved["seeded"], 1)
+
     # ------------------------------------------------------------------ 显式覆盖
     def test_explicit_env_wins(self):
         program = self._mk("qs-install-")
