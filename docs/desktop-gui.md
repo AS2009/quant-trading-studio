@@ -26,14 +26,17 @@
    开始菜单（「QuantTrading Studio」组：主程序 / 安装与数据说明 / 卸载），桌面快捷方式可选；
 3. 想装到 Program Files 供所有用户用：向导第一页选「Install for all users」即可（会请求管理员权限）；
 4. 卸载：开始菜单 →「卸载 QuantTrading Studio」，或 设置 → 应用 →「QuantTrading Studio」。
-   **卸载默认保留用户数据**（交互式会多问一句，默认「否」）。
+   **卸载默认保留用户数据**（交互式会多问一句「是否同时删除用户数据」，默认「否」；静默卸载一律保留；
+   `strategies\` 与 `data\` 目录带 `uninsneveruninstall`，空了也不删）。升级覆盖安装沿用安装目录，数据不动。
 
 **Windows —— 免安装（zip / 单文件）**
 
 1. 下载 `QuantTradingStudio-windows-x64.zip`，解压到任意目录（例如 `D:\QuantTradingStudio`），
    双击 **`QuantTradingStudio.exe`**；
 2. 或下载 `QuantTradingStudio-onefile-windows-x64.exe`（单文件，体积小，首次启动要自解压、稍慢）；
-3. 首次启动会创建数据目录 `%LOCALAPPDATA%\QuantTradingStudio\data`，无需管理员权限。
+3. 首次启动会在程序目录里建好 `strategies\`（策略 .py，复制进去即用）与 `data\`（`csv\` 行情 /
+   `level2\` 盘口 / `cache\` 缓存 / 账本 JSON），无需管理员权限；程序目录不可写时自动退回
+   `%LOCALAPPDATA%\QuantTradingStudio\data`（见第 4 节）。
 
 **macOS**：见下面的 [方式 D](#方式-d本机打包-macos-版) 与 Releases 里的 `QuantTradingStudio-macos-arm64.dmg`。
 
@@ -100,8 +103,10 @@ powershell -ExecutionPolicy Bypass -File desktop\build\build_installer.ps1 -Skip
 产物：`desktop/build/output/artifacts/QuantTradingStudio-<版本>-Setup.exe`（约 13–14 MB，LZMA2 压缩）。
 
 脚本会做**安装包自检**（这一步才是关键）：静默安装到临时目录 → 检查开始菜单快捷方式与
-「应用和卸载」登记（含版本号）→ 跑**装好后的** `QuantTradingStudio.exe --selftest` →
-静默卸载 → 断言程序目录已删除、而 `%LOCALAPPDATA%\QuantTradingStudio` 用户数据**保留**。
+「应用和卸载」登记（含版本号）→ 断言安装目录里 `strategies\` 与 `data\{csv,level2}` 已建好 →
+跑**装好后的** `QuantTradingStudio.exe --selftest`（报告里「目录模式」= 程序目录、策略目录 = 安装目录下的
+`strategies`）→ 复制一份策略成 `setup_probe.py` 再自检（报告里出现 `st_setup_probe`，证明复制进去就能用）→
+静默卸载 → 断言主程序与 `_internal\` 已删除，而 `strategies\setup_probe.py` 与 `data\csv` **保留**。
 CI 每次都跑（`build-desktop` 工作流的「构建并自检 Windows 安装包」）。
 
 ---
@@ -140,10 +145,10 @@ CI 每次都跑（`build-desktop` 工作流的「构建并自检 Windows 安装�
 
 ### 菜单
 
-* **文件**：刷新当前页、刷新数据源状态、打开数据目录、打开文档目录、退出
+* **文件**：刷新当前页、刷新数据源状态、打开数据目录、打开策略目录、打开文档目录、退出
 * **视图**：六个页面（与左侧导航一致）
 * **工具**：数据源自检…（当场探测各数据源连通性）、清空回测缓存、重置模拟盘账户…
-* **帮助**：关于（版本/数据目录）、如何编写策略（打开 `docs/strategy-spec.md`）
+* **帮助**：关于（版本/数据目录/策略目录）、如何编写策略（打开 `docs/strategy-spec.md`）
 
 ---
 
@@ -152,27 +157,32 @@ CI 每次都跑（`build-desktop` 工作流的「构建并自检 Windows 安装�
 | 页面 | 主要内容 | 典型操作 |
 |---|---|---|
 | **行情看板** | 指数卡片、市场广度与资金、板块涨幅榜、自选股实时行情、个股 K 线（含成交量） | 输入代码加自选；点自选股切 K 线；切换日/周/月周期；`Ctrl+R` 刷新 |
-| **策略管理** | 策略清单（内置 / `strategies/local` / 用户），参数 schema 表单，校验结果 | 选策略→设参数→「查看回测」直接跳到回测页；新建自定义策略；查看策略说明 |
+| **策略管理** | 策略清单（内置 / 本地代码 / 用户），参数 schema 表单，校验结果 | 选策略→设参数→「查看回测」直接跳到回测页；新建自定义策略；查看策略说明 |
 | **回测分析** | 参数区（策略、标的池、区间、初始资金、基准、费用与滑点：佣金率/单笔最低佣金/流量费、比例滑点 + 跳数滑点）、净值 vs 基准、回撤曲线、月度收益、绩效指标、成交流水、期末持仓 | 选好参数点「开始回测」；在成交流水里核对每笔买卖与费用 |
 | **持仓管理** | 录入真实持仓（代码/数量/成本/可用数量/现金），实时估值、盈亏、行业与单票占比、权益曲线 | 「新增/编辑/删除持仓」；「保存快照」把当日权益写进曲线 |
 | **交易（模拟盘）** | 模拟账户资产、下单（买/卖、价格、数量）、订单列表（撤单）、成交流水、当前持仓 | 按实时价模拟成交（T+1、手续费、涨跌停约束），全部本地记账 |
 | **盘口 / L2** | 五档盘口（卖 5→卖 1→买 1→买 5，卖绿买红）、逐笔成交（时间/价格/手数/金额/方向，最多 60 行）、资金流分档（超大单/大单/中单/小单净额与买入占比 + 主力净额与占比）、指标卡（现价/涨跌幅/委比/委差/外盘/内盘），内含大单追踪、资金流分时、封板状态、自选池扫描与资金流排行 | 输入代码点「查询」（`Ctrl+6` 直达）；需要盯盘时勾「自动刷新（3 秒）」——它**只**刷新盘口/逐笔/资金流分档，4 个工具必须手动点（大单/分时约 3–10 秒、扫描约 1 秒/只、排行约 10–25 秒/只，10 只可能 2–4 分钟，进行中不阻塞其它区块）；页面顶部灰字标注数据边界：五档是公开源**快照**、逐笔方向是**第三方盘口标记**（非交易所 Level-2），十档/逐笔委托/委托队列需付费授权 |
 
-数据落地在本地文件（`portfolio.json`、`orders.json`、`fills.json` 等），可随时用**文件 → 打开数据目录**查看或备份。
+数据落地在本地文件（`portfolio.json`、`orders.json`、`fills.json` 等），可随时用**文件 → 打开数据目录 / 打开策略目录**查看或备份。
 
 ---
 
 ## 4. 数据目录与自定义策略
 
-| 运行方式 | 数据目录 |
-|---|---|
-| 源码运行 | `<仓库>/backend/data/` |
-| 打包运行 | `%LOCALAPPDATA%\QuantTradingStudio\data`（程序目录可能只读，所以放用户目录） |
-| 任意 | 设环境变量 `QUANTSTUDIO_DATA_DIR` 可覆盖（便于便携版/多账户） |
+| 运行方式 | 数据目录 | 策略目录 |
+|---|---|---|
+| 源码运行 | `<仓库>/backend/data/` | 包内 `backend/quantstudio/strategies/local/` |
+| 打包运行（安装版 / zip / 单文件） | **程序所在目录**下的 `data\`（`csv\` 行情、`level2\` 盘口、`cache\` 缓存、账本 JSON） | 程序所在目录下的 `strategies\` |
+| 程序目录不可写时 | 自动退回用户目录：Windows `%LOCALAPPDATA%\QuantTradingStudio\data`、macOS `~/Library/Application Support/QuantTradingStudio/data` | 同目录下的 `strategies\`（Windows `…\QuantTradingStudio\strategies`） |
+| 任意 | 环境变量 `QUANTSTUDIO_DATA_DIR` 可覆盖（便于便携版/多账户） | `QUANTSTUDIO_STRATEGIES_DIR` |
 
-**自定义策略**：源码运行时把 `py` 文件丢进 `backend/quantstudio/strategies/local/`，重启即可在策略页看到
-（`origin=local`）。**打包后的程序无法热插拔策略**——策略源码在只读的解包目录里，需要把文件放进
-`backend/quantstudio/strategies/local/` 后重新打包（spec 会自动收集该目录下所有 `.py`）。
+打包版首次启动会在 `strategies\` 播种内置示例与 `_template.py` 模板，并给 `data\csv`、`data\level2` 放中文说明；
+旧版本（≤ v1.5.0）放在用户目录的数据会**复制**到新位置（原位置保留，`cache\` 不迁移）。
+
+**自定义策略**：打包版把 `py` 文件直接复制进程序目录的 `strategies\`（`_` 开头的文件不加载），重启程序
+或在「策略」页点「刷新」即可看到（`origin=local`）——**不用重新打包**。源码运行才放
+`backend/quantstudio/strategies/local/`，重启即可；打包脚本从该目录收集内置示例与模板，所以只有改仓库里的
+示例/模板才需要重新打包。
 
 写策略前请先读 [`strategy-spec.md`](strategy-spec.md)，并用 `python scripts/check_strategies.py` 自检。
 

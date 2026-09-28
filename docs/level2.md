@@ -153,7 +153,7 @@ class MyL2Provider(BaseHTTPProvider):
 
 ### 4.2 本地文件导入（推荐给只能用客户端导出的人）
 
-把导出的 CSV 放到 `QUANTSTUDIO_LEVEL2_DIR`（默认 `<data_dir>/level2`）下，命名（代码写法
+把导出的 CSV 放到 `QUANTSTUDIO_LEVEL2_DIR`（默认 `<data_dir>/level2`，即数据目录下的 `level2\`；打包版数据目录在安装目录内）下，命名（代码写法
 `600519.SH` / `600519` / `sh600519` / `600519-SH` 均可，`-`/`_`/空格与 `.` 等价）：
 
 ```

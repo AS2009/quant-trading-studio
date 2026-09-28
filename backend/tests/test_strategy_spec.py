@@ -9,7 +9,9 @@ import json
 import importlib
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 import unittest
 from unittest import mock
@@ -365,6 +367,69 @@ class TestStaleImportCache(LocalFixtureMixin):
             report = lint_module.lint_path(path, origin="local", smoke=False)
         self.assertTrue(report["ok"], TestLintRules._errors(report))
 
+
+class TestStrategiesDirOutsidePackage(LocalFixtureMixin):
+    """安装版布局：用户策略目录在**包外**（安装目录下的 strategies/）也要能用。
+
+    v1.5.1 起桌面版把 ``QUANTSTUDIO_STRATEGIES_DIR`` 指向安装目录下的 ``strategies/``，
+    用户把 .py 复制进去就会被加载。这里把 ``LOCAL_DIR`` 指到临时目录来复现同一形态：
+    相对导入（``from ..base import ...``）、注册、lint 都必须照旧工作。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.mkdtemp(prefix="qs-strategies-")
+        self._backup_local_dir = registry_module.LOCAL_DIR
+        registry_module.LOCAL_DIR = self.tmp
+
+    def tearDown(self):
+        registry_module.LOCAL_DIR = self._backup_local_dir
+        super().tearDown()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def _outside_source(slug, class_name, strategy_id):
+        """拿包内模板改造成一个「复制进来的」合法策略（文件名/id/类名三处一起改）。"""
+        template_path = os.path.join(
+            os.path.dirname(os.path.abspath(registry_module.__file__)), "local", "_template.py")
+        with open(template_path, encoding="utf-8") as handle:
+            text = handle.read()
+        return (text.replace("BreakoutAtrStrategy", class_name)
+                    .replace("st_breakout_atr", strategy_id)
+                    .replace("<策略中文名>", "包外目录探针策略")
+                    .replace("<slug>", slug))
+
+    def write_local(self, slug, source):
+        """写到**当前** LOCAL_DIR（基类用的是 import 时复制的常量，这里必须用模块属性）。"""
+        path = os.path.join(registry_module.LOCAL_DIR, slug + ".py")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(source)
+        self._paths.append(path)
+        return path
+
+    def test_discover_local_loads_strategy_outside_package(self):
+        source = self._outside_source("outside_probe", "OutsideProbeStrategy", "st_outside_probe")
+        self.write_local("outside_probe", source)
+        ids = registry_module.discover_local(force=True)
+        self.assertEqual(registry_module.LOCAL_ERRORS, [], "包外策略不应加载失败")
+        self.assertIn("st_outside_probe", ids)
+        self.assertTrue(is_local("st_outside_probe"))
+        # 模块名仍是包内规范名：策略里的相对导入靠它解析
+        self.assertEqual(REGISTRY["st_outside_probe"].__module__,
+                         "quantstudio.strategies.local.outside_probe")
+
+    def test_lint_strategy_outside_package_is_clean(self):
+        source = self._outside_source("outside_lint", "OutsideLintStrategy", "st_outside_lint")
+        path = self.write_local("outside_lint", source)
+        report = lint_module.lint_path(path, origin="local", smoke=False)
+        self.assertTrue(report["ok"], report["errors"])
+        self.assertEqual(report["classes"], ["OutsideLintStrategy"])
+
+    def test_discover_creates_missing_dir(self):
+        missing = os.path.join(self.tmp, "created")
+        registry_module.LOCAL_DIR = missing
+        registry_module.discover_local(force=True)
+        self.assertTrue(os.path.isdir(missing), "策略目录不存在时应自动创建（安装版首次启动）")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

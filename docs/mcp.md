@@ -142,7 +142,7 @@ exe 的下载与打包见 [desktop-gui.md](desktop-gui.md)。
 | `strategy_get` | 单个策略的定义与参数 schema | 只读 |
 | `strategy_read_source` | 读取策略 Python 源码（改代码前先读） | 只读 |
 | `strategy_lint` | 校验策略代码（静态规范 + 运行期 + 烟雾回测 + 无未来函数） | 只读 |
-| `strategy_write_source` | 写入 `strategies/local/<slug>.py`，写完热加载并自动校验 | **写** |
+| `strategy_write_source` | 写入 `strategies/local/<slug>.py`（打包版这个目录 = 安装目录下的 `strategies\`，由 `QUANTSTUDIO_STRATEGIES_DIR` 决定），写完热加载并自动校验 | **写** |
 | `strategy_delete_source` | 删除本地代码策略（需 `confirm=true`，删除前备份） | **写** |
 | `strategy_user_create` | 新建「用户策略」（内置模板 + 参数，不落代码文件） | **写** |
 | `strategy_user_delete` | 删除用户策略条目（先备份 `user_strategies.json`） | **写** |
@@ -259,9 +259,9 @@ exe 的下载与打包见 [desktop-gui.md](desktop-gui.md)。
   写工具会从清单里消失并且调用会被拒绝（见下）。
 * **写策略的护栏**（`backend/quantstudio/mcp/safety.py` + `tools_strategy.py`）：
   * 策略 id 必须匹配 `^st_[a-z0-9_]{2,36}$`；
-  * 只能写 `strategies/local/`（单层文件名 + `realpath` 复核，拒绝 `../`、绝对路径与子目录）；
+  * 只能写 `strategies/local/`（打包版这个目录 = 安装目录下的 `strategies\`，由 `QUANTSTUDIO_STRATEGIES_DIR` 决定；单层文件名 + `realpath` 复核，拒绝 `../`、绝对路径与子目录）；
   * **原子写**：先写临时文件再 `os.replace`，不会出现半截文件；
-  * 覆盖 / 删除前自动备份到 `<数据目录>/strategy-backups/`（文件名带时间戳，可回滚）；
+  * 覆盖 / 删除前自动备份到 `<数据目录>/strategy-backups/`（打包版数据目录在安装目录内；文件名带时间戳，可回滚）；
   * 单个源文件 **≤ 128 KB**（`MAX_SOURCE_BYTES`）；
   * 危险 import / 调用（网络、文件、随机、时间等）由**策略校验器**直接判错，不是靠模型自觉。
 * **审计日志**：每次写操作追加一行 JSON 到 `<数据目录>/mcp-audit.log`

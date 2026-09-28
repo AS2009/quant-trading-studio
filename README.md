@@ -57,11 +57,13 @@ powershell -ExecutionPolicy Bypass -File desktop\build\build_installer.ps1  :: �
 
 Windows 使用者最省事的是 **安装包**：下载 `QuantTradingStudio-<版本>-Setup.exe`，下一步→下一步→完成，
 开始菜单 / 桌面快捷方式 / 卸载项齐活；默认按当前用户安装（不弹 UAC），**卸载默认保留用户数据**。
+用户数据就在程序目录内（`strategies\` 放策略 .py、`data\` 放行情 CSV / 账本 / 缓存，复制进去即可用），
+旧版本放在用户目录（`%LOCALAPPDATA%\QuantTradingStudio`）的数据首次启动会自动**复制**过来（原位置保留）。
 不想安装就用 `QuantTradingStudio-windows-x64.zip`（解压即用）或单文件 exe。
 
 推送代码后 GitHub Actions 会自动编译：`.github/workflows/build-desktop.yml` 在 **windows-latest** 上产出
 onedir + onefile + **Inno Setup 安装包**（**都跑真实自检**：产物自检 `--selftest` / `--selftest-gui` 必须 exit 0，
-安装包还会静默装一遍、跑装好后的 `--selftest`、再静默卸载并断言用户数据保留）；
+安装包还会静默装一遍、断言 `strategies\`/`data\` 已建好、跑装好后的 `--selftest`、再静默卸载并断言用户数据保留）；
 `.github/workflows/build-macos.yml` 在 **macos-14** 上用 Homebrew `python-tk@3.12` 产出自带 Tcl/Tk 9 的 `.app` / `.zip` / `.dmg`
 （ad-hoc 签名）。打 `v*` 标签会自动把三种产物附到 Release。
 
@@ -122,7 +124,7 @@ quant-trading-studio/
 | 想做什么 | 改哪里 | 怎么改 |
 |---|---|---|
 | 换行情源（如 Tushare/Wind） | `quantstudio/data/` | 新写一个 `XxxProvider`，实现 `DataProvider` 协议（7 个方法），在 `data/__init__.py` 注册即可；降级链与缓存自动生效 |
-| 加一个策略 | `quantstudio/strategies/local/` | **推荐方式**：复制 `local/_template.py` 写成 `local/<slug>.py`，重启即出现在策略列表；**必须**通过 `python scripts/check_strategies.py` 校验（命名/参数/无未来函数/烟雾回测）。规范与示例见 `docs/` |
+| 加一个策略 | 源码运行 `quantstudio/strategies/local/`；打包版安装目录的 `strategies\` | **推荐方式**：复制 `local/_template.py`（打包版是安装目录 `strategies\_template.py`）写成 `<slug>.py`，重启或在策略页刷新即出现在策略列表；**必须**通过 `python scripts/check_strategies.py` 校验（命名/参数/无未来函数/烟雾回测）。规范与示例见 `docs/` |
 | 把自研策略并入库 | `quantstudio/strategies/` + `registry.py` | 作为内置策略发布：文件放包根目录，在 `registry.py` 里 import 并 `register_builtin(cls)`，并加入 `BUILTIN_ORDER` |
 | 改交易规则/费用 | `quantstudio/backtest/broker.py`、`core/models.FeeConfig` | 撮合与费用集中在这两处 |
 | 加绩效指标 | `quantstudio/backtest/metrics.py` | 新增纯函数并在 `compute_metrics` 里填充 |
@@ -236,6 +238,9 @@ cp backend/quantstudio/strategies/local/_template.py backend/quantstudio/strateg
 python scripts/check_strategies.py --path backend/quantstudio/strategies/local/my_alpha.py   # 必须 0 error
 python scripts/run_backtest.py --strategy st_my_alpha --symbols 600519.SH --start 2024-01-01
 ```
+
+打包版不用这套路径：把 `.py` 直接复制进安装目录的 `strategies\`（重启程序或在「策略」页点「刷新」），
+不用重新打包；上面的 `local/` 是源码运行的位置。
 
 规范与文档（**写策略前请先读**）：
 

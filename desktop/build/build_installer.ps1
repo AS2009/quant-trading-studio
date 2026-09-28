@@ -9,13 +9,18 @@
       1) 确保 onedir 产物存在（没有就调 build_windows.ps1 打一个）
       2) 用 Inno Setup 编译出 QuantTradingStudio-<版本>-Setup.exe
       3) **安装包自检**（和产物自检同等重要）：
-         静默安装到临时目录 → 检查开始菜单快捷方式 / 「应用和卸载」登记 / 装好的 exe 能跑 --selftest
-         → 静默卸载 → 断言程序目录已删除、而用户数据目录（%LOCALAPPDATA%\QuantTradingStudio）**保留**
+         清掉产物目录里自检遗留的 data\/strategies\ → 静默安装到临时目录 →
+         检查开始菜单快捷方式 / 「应用和卸载」登记 / 建出的 strategies\ 与 data\{csv,level2} →
+         跑装好的 exe 的 --selftest（断言报告里的数据目录/策略目录就在安装目录内）→
+         手工复制一份策略进 strategies\ 再自检（验证「复制进去就能用」）→ 静默卸载 →
+         断言程序文件已删除、而用户数据（安装目录下的 strategies\ 与 data\）**保留**
       4) 汇总
 
     设计约定（与 installer\quantstudio.iss 一致）：
       * 默认按当前用户安装（不需要管理员）；安装包自检也按这个路径走，CI 里不需要提权；
-      * 卸载默认不删用户数据 —— 第 3 步会真的验证这一点。
+      * v1.5.1 起用户数据就在**安装目录**内（strategies\ 与 data\），卸载默认保留 —— 第 3 步会真的验证；
+      * 本机若已装过本程序，静默自检可能被 Inno 的 UsePreviousAppDir 引到真实安装目录：
+        自检前会检测既有安装并直接报错退出（CI 干净机器不受影响）。
 
 .PARAMETER Version
     安装包版本号（默认从 desktop\quantstudio_desktop\__init__.py 读 __version__）。
@@ -57,7 +62,9 @@ $OnedirDir    = Join-Path $OutputDir "dist\QuantTradingStudio"
 $OnedirExe    = Join-Path $OnedirDir "QuantTradingStudio.exe"
 $IconFile     = Join-Path $BuildDir "icon.ico"
 $ReportPath   = Join-Path $env:TEMP "quantstudio_selftest.txt"
-$DataDir      = Join-Path $env:LOCALAPPDATA "QuantTradingStudio"
+$DataDir      = Join-Path $env:LOCALAPPDATA "QuantTradingStudio"   # 旧版本（≤ v1.5.0）的用户数据位置
+$NewDataName  = "data"                                             # v1.5.1 起：用户数据在安装目录下
+$NewStrategiesName = "strategies"
 $TestDir      = Join-Path $env:TEMP ("qts-setup-test-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 $TestLog      = Join-Path $env:TEMP "qts-setup-test.log"
 
@@ -150,6 +157,16 @@ else {
     if (-not (Test-Path $OnedirExe)) { throw "打包后仍找不到 $OnedirExe" }
 }
 
+# 产物目录本身就是「程序目录」：如果之前跑过这个 exe（CI 的产物自检、或本机双击试跑），
+# 它会在里面留下运行期 data\ 与 strategies\。清掉再编译，避免把别人的缓存/账本/示例策略打进安装包
+# （.iss 的 [Files] 另有 Excludes 兜底，这里是第一道）。
+foreach ($stale in @((Join-Path $OnedirDir "data"), (Join-Path $OnedirDir "strategies"))) {
+    if (Test-Path $stale) {
+        Write-Host "清掉产物目录里的运行期数据：$stale"
+        Remove-Item -Recurse -Force $stale -ErrorAction SilentlyContinue
+    }
+}
+
 # =========================================================================== 2. 编译安装包
 Write-Step "2/4 编译 Setup.exe（Inno Setup）"
 $setupPath = Join-Path $Artifacts "QuantTradingStudio-$Version-Setup.exe"
@@ -164,9 +181,25 @@ if ($SkipVerify) {
     Write-Host "已跳过（-SkipVerify）"
 }
 else {
+    # 本机已装过本程序时，Inno 的 UsePreviousAppDir 可能把静默安装引到**真实安装目录**，
+    # 而下面的静默卸载会删掉那里的用户数据 —— 检测到既有安装就直接退出。
+    # （CI 的干净机器没有这个条目，不受影响；本机想只出包请用 -SkipVerify。）
+    $existingInstall = @(Get-ChildItem "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall" -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+            if ($props -and $props.PSObject.Properties['DisplayName'] -and
+                $props.DisplayName -like "QuantTrading Studio*") { $props.DisplayName }
+        })
+    if ($existingInstall.Count -gt 0) {
+        $name = $existingInstall[0]
+        throw ("本机已安装过本程序（$name）：静默自检可能装到真实安装目录，卸载时连用户数据一起删。" +
+               "请先卸载（卸载时保留数据）再跑，或用 -SkipVerify 只出包。")
+    }
+
     if (Test-Path $TestDir) { Remove-Item -Recurse -Force $TestDir }
 
     Write-Host "-> 静默安装到 $TestDir"
+
     $installArgs = @(
         "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/NOCANCEL",
         "/LOG=`"$TestLog`"", "/DIR=`"$TestDir`""
@@ -198,29 +231,65 @@ else {
         throw "卸载登记里的版本号是 $($uninstallKey.DisplayVersion)，期望 $Version"
     }
 
-    Write-Host "-> 跑安装后产物自检（同时会创建用户数据目录）"
-    $dataDirExisted = Test-Path $DataDir          # 记下来：本机跑脚本时别把用户自己的数据删了
-    Invoke-GuiSelftest -ExePath $installedExe -Argument "--selftest"
-    if (-not (Test-Path (Join-Path $DataDir "data"))) {
-        Write-Warning "用户数据目录还没出现：$DataDir\data（自检没走到写数据那一步？）"
+    $installedData       = Join-Path $TestDir "data"
+    $installedStrategies = Join-Path $TestDir "strategies"
+    foreach ($dir in @($installedStrategies, $installedData,
+                       (Join-Path $installedData "csv"), (Join-Path $installedData "level2"))) {
+        if (-not (Test-Path $dir)) { throw "安装包没建出用户文件夹：$dir（[Dirs] 段漏了？）" }
     }
+    Write-Host "   用户文件夹  : strategies\ + data\{csv,level2} 已建好 ✅"
+
+    Write-Host "-> 跑安装后产物自检（数据/策略都在安装目录内）"
+    $legacyDataExisted = Test-Path $DataDir    # 旧版本（≤ v1.5.0）的用户数据：本机跑脚本时别把用户自己的删了
+    Invoke-GuiSelftest -ExePath $installedExe -Argument "--selftest"
+    $report = if (Test-Path $ReportPath) { Get-Content $ReportPath -Raw -Encoding UTF8 } else { "" }
+    # 「程序目录」这四个字在 user 模式的文案里也有（「用户目录（程序目录不可写）」），
+    # 所以必须断言到具体路径 + 「安装/解压目录」这个 install 模式专属说法
+    if ($report -notmatch [regex]::Escape($installedData)) {
+        throw "自检报告里的数据目录不是安装目录下的 data：$installedData"
+    }
+    if ($report -notmatch "安装/解压目录") {
+        throw "自检报告的目录模式不是「程序目录（安装/解压目录）」（install 模式判定没生效？）"
+    }
+    if ($report -notmatch [regex]::Escape($installedStrategies)) {
+        throw "自检报告里的策略目录不是安装目录下的 strategies：$installedStrategies"
+    }
+    $seeded = @(Get-ChildItem $installedStrategies -Filter *.py -ErrorAction SilentlyContinue)
+    if ($seeded.Count -lt 1) { throw "首次启动没有把内置示例策略放进 strategies\（播种失败）" }
+    Write-Host ("   内置示例    : 已播种 {0} 个 .py ✅" -f $seeded.Count)
+
+    Write-Host "-> 手工复制一份策略进 strategies\，再跑自检（验证「复制进去就能用」）"
+    $templatePath = Join-Path $installedStrategies "_template.py"
+    if (-not (Test-Path $templatePath)) { throw "找不到策略模板：$templatePath" }
+    $probePath = Join-Path $installedStrategies "setup_probe.py"
+    $probeText = (Get-Content $templatePath -Raw -Encoding UTF8) `
+        -replace "BreakoutAtrStrategy", "SetupProbeStrategy" -replace "st_breakout_atr", "st_setup_probe"
+    [System.IO.File]::WriteAllText($probePath, $probeText, (New-Object System.Text.UTF8Encoding($false)))
+    Invoke-GuiSelftest -ExePath $installedExe -Argument "--selftest"
+    $report2 = if (Test-Path $ReportPath) { Get-Content $ReportPath -Raw -Encoding UTF8 } else { "" }
+    if ($report2 -notmatch "st_setup_probe") { throw "复制进 strategies\ 的策略没有被加载（报告里没有 st_setup_probe）" }
+    Write-Host "   复制进来的  : st_setup_probe 已加载 ✅"
 
     Write-Host "-> 静默卸载"
     $uninstaller = Join-Path $TestDir "unins000.exe"
     if (-not (Test-Path $uninstaller)) { throw "找不到卸载程序：$uninstaller" }
     $proc = Start-Process -FilePath $uninstaller -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -Wait -PassThru
     if ($proc.ExitCode -ne 0) { throw "静默卸载失败（exit=$($proc.ExitCode)）" }
-    Start-Sleep -Seconds 2                      # 卸载进程退出后给它一点时间删目录
+    # Inno 的卸载器会把工作交接给 %TEMP% 里的副本再退出：固定的 sleep 不够（几千个文件 + Defender 扫描），
+    # 这里轮询等主程序真的消失（最多 60 秒），避免「卸载还没跑完就断言」的假失败/假通过。
+    for ($i = 0; $i -lt 120 -and (Test-Path $installedExe); $i++) { Start-Sleep -Milliseconds 500 }
 
-    if (Test-Path $TestDir) { throw "卸载后程序目录仍在：$TestDir" }
-    Write-Host "   程序目录    : 已删除 ✅"
-    if (-not (Test-Path $DataDir)) { throw "用户数据目录被误删了：$DataDir（卸载默认必须保留）" }
-    Write-Host "   用户数据    : 保留 ✅（$DataDir）"
+    if (Test-Path $installedExe) { throw "卸载后主程序仍在：$installedExe" }
+    if (Test-Path (Join-Path $TestDir "_internal")) { throw "卸载后程序文件目录仍在：$TestDir\_internal" }
+    Write-Host "   程序文件    : 已删除 ✅"
+    if (-not (Test-Path $probePath)) { throw "卸载把用户放进去的策略删了：$probePath（卸载默认必须保留用户数据）" }
+    if (-not (Test-Path (Join-Path $installedData "csv"))) { throw "卸载把行情导入目录（data\csv）删了" }
+    Write-Host "   用户数据    : 保留 ✅（$TestDir\strategies、$TestDir\data）"
 
-    Write-Host "-> 清理自检残留（临时安装目录；用户数据目录只在本轮才创建时才删）"
-    if (Test-Path $TestDir) { Remove-Item -Recurse -Force $TestDir -ErrorAction SilentlyContinue }
-    if ($dataDirExisted) {
-        Write-Host "   用户数据    : 装前就存在，原样保留（本机跑脚本不会动你自己的数据）"
+    Write-Host "-> 清理自检残留（本轮临时安装目录；旧位置的用户数据只在本次才创建时才删）"
+    Remove-Item -Recurse -Force $TestDir -ErrorAction SilentlyContinue
+    if ($legacyDataExisted) {
+        Write-Host "   旧用户数据  : 装前就存在，原样保留（本机跑脚本不会动你自己的数据）"
     }
     else {
         Remove-Item -Recurse -Force $DataDir -ErrorAction SilentlyContinue
@@ -235,4 +304,5 @@ Get-ChildItem $Artifacts -Filter "*.exe" | ForEach-Object {
 }
 Write-Host ""
 Write-Host "完成 ✅  双击 $setupPath 就是「下一步 → 下一步 → 完成」的安装向导（默认不需要管理员）。" -ForegroundColor Green
-Write-Host "用户数据：$DataDir\data（卸载默认保留；可用环境变量 QUANTSTUDIO_DATA_DIR 覆盖）。"
+Write-Host "用户数据：安装目录下的 $NewStrategiesName\（策略 .py）与 $NewDataName\（行情 CSV、盘口 CSV、账本、缓存）——复制文件进去即可用；卸载默认保留。"
+Write-Host "旧版本（≤ v1.5.0）放在 %LOCALAPPDATA%\QuantTradingStudio 的数据，程序首次启动会自动复制过来（原位置保留）。"

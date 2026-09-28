@@ -83,9 +83,14 @@ for _cls in (MaCrossStrategy, MomentumStrategy, GridStrategy,
 
 
 # ========================================================================== 本地策略自动发现
-# 运行期约定：``strategies/local/<slug>.py`` 会被本模块按文件名排序导入并注册，
+# 运行期约定：策略目录里的 ``<slug>.py`` 会被本模块按文件名排序导入并注册，
 # 单个文件失败只在 LOCAL_ERRORS 中记录原因并跳过 —— 任何情况下都不允许影响应用启动。
-LOCAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local")
+#
+# 目录位置：源码运行 = 包内 ``quantstudio/strategies/local``（开发期布局不变）；
+# 桌面版（打包）由 ``boot.prepare()`` 把 ``QUANTSTUDIO_STRATEGIES_DIR`` 指向**安装目录下的
+# ``strategies/``** —— 用户把策略 .py 复制进去就会被加载（见 desktop/quantstudio_desktop/boot.py）。
+LOCAL_DIR = (os.environ.get("QUANTSTUDIO_STRATEGIES_DIR", "").strip()
+             or os.path.join(os.path.dirname(os.path.abspath(__file__)), "local"))
 _LOCAL_PACKAGE = __name__.rsplit(".", 1)[0] + ".local"      # quantstudio.strategies.local
 LOCAL_IDS: List[str] = []
 LOCAL_ERRORS: List[Dict[str, str]] = []
@@ -131,7 +136,11 @@ def _import_local_module(slug: str, filename: str):
 
 
 def discover_local(force: bool = False) -> List[str]:
-    """导入并注册 ``strategies/local/*.py``（幂等）。返回成功加载的策略 id 列表。"""
+    """导入并注册策略目录（``LOCAL_DIR``）里的 ``*.py``，幂等。返回成功加载的策略 id 列表。
+
+    目录不存在时会尝试创建（安装版首次启动的 ``strategies/`` 就是这里建出来的）；
+    创建失败（只读介质）只是当作「没有本地策略」，不影响启动。
+    """
     global _local_discovered
     if _local_discovered and not force:
         return list(LOCAL_IDS)
@@ -139,6 +148,10 @@ def discover_local(force: bool = False) -> List[str]:
         LOCAL_IDS.clear()
         LOCAL_ERRORS.clear()
     _local_discovered = True
+    try:
+        os.makedirs(LOCAL_DIR, exist_ok=True)
+    except OSError:
+        return list(LOCAL_IDS)
     if not os.path.isdir(LOCAL_DIR):
         return list(LOCAL_IDS)
     for filename in sorted(os.listdir(LOCAL_DIR)):

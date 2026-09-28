@@ -129,6 +129,11 @@ def _run_selftest(symbol: str = "600519.SH") -> int:
     print("Python     :", info["python"])
     print("核心包目录 :", info["core_dir"])
     print("数据目录   :", info["data_dir"])
+    print("策略目录   :", info.get("strategies_dir") or "（包内 strategies/local）")
+    print("目录模式   :", {"install": "程序目录（安装/解压目录）", "user": "用户目录（程序目录不可写）",
+                          "source": "源码运行", "explicit": "环境变量指定"}.get(str(info.get("mode")), "未知"))
+    for note in info.get("notes") or []:
+        print("提示       :", note)
 
     try:
         import quantstudio

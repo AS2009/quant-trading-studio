@@ -87,9 +87,13 @@ class TestRealDataPath(unittest.TestCase):
         quotes = self.provider.latest_quotes([STOCK])
         self.assertTrue(quotes, "实时快照为空")
         quote = quotes[0]
-        self.assertGreater(quote.price, 100)
+        # 开盘前（约 00:00–09:15 北京时间）免费源会把「现价」置 0，只有昨收是真实值 ——
+        # 这时用昨收做量级与一致性校验，避免把「还没开盘」误判成「假数据」。
+        price = quote.price if quote.price > 0 else quote.prev_close
+        self.assertGreater(price, 100,
+                           "快照既没有现价也没有昨收：price=%r prev_close=%r" % (quote.price, quote.prev_close))
         # 快照价与最后一根 K 线收盘价差异应在 20% 以内（盘中/复权口径允许小幅差异）
-        self.assertLess(abs(quote.price - bars[-1].close) / bars[-1].close, 0.2)
+        self.assertLess(abs(price - bars[-1].close) / bars[-1].close, 0.2)
 
     def test_backtest_on_real_data(self):
         from quantstudio.backtest.engine import BacktestEngine

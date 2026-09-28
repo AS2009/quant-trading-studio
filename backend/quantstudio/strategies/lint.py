@@ -579,6 +579,24 @@ def _package_module_name(path: str) -> Optional[str]:
     return ".".join(parts)
 
 
+def _local_module_name(path: str) -> Optional[str]:
+    """用户策略目录（``registry.LOCAL_DIR``）里文件的模块名。
+
+    安装版把用户策略目录挪到了安装目录下（在包外），但策略文件用的是
+    ``from ..base import ...`` 这类**相对导入**，模块名必须挂在
+    ``quantstudio.strategies.local`` 之下才解析得到 —— 所以这里沿用与
+    ``registry._import_local_module`` 完全相同的命名方案，而不是另起一个自由名字。
+    """
+    from . import registry as registry_module
+
+    local_dir = os.path.abspath(registry_module.LOCAL_DIR)
+    if os.path.dirname(os.path.abspath(path)) != local_dir:
+        return None
+    slug = os.path.basename(path)[:-3]
+    if not slug.isidentifier():
+        return None
+    return "%s.%s" % (registry_module._LOCAL_PACKAGE, slug)
+
 def _load_by_path(module_name: str, path: str):
     """按文件路径加载模块；``module_name`` 同时决定 ``__package__``，相对导入才能生效。"""
     try:
@@ -611,7 +629,9 @@ def _load_module(path: str, refresh: bool = False):
     （Windows CI 上实测出现），因此先 ``invalidate_caches()``，仍失败时按路径加载——
     但**沿用包名**，否则策略文件里的相对导入会失败（见 ``registry._import_local_module``）。
     """
-    name = _package_module_name(path)
+    # 包内文件按包路径命名；安装版的用户策略目录在包外，沿用 ``quantstudio.strategies.local.<slug>``
+    # 这个包名（相对导入才解析得到），实际文件由下面的 ``_load_by_path`` 兜底按路径加载。
+    name = _package_module_name(path) or _local_module_name(path)
     if name:
         importlib.invalidate_caches()          # 新写入的文件必须让导入系统重新读目录列表（Windows 上尤其明显）
         try:

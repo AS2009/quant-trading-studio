@@ -106,6 +106,7 @@ class DesktopApp(tk.Tk):
         file_menu.add_command(label="刷新数据源状态", command=lambda: self._poll_status(force=True))
         file_menu.add_separator()
         file_menu.add_command(label="打开数据目录", command=self.open_data_dir)
+        file_menu.add_command(label="打开策略目录", command=self.open_strategies_dir)
         file_menu.add_command(label="打开文档目录", command=self.open_docs_dir)
         file_menu.add_separator()
         file_menu.add_command(label="退出", accelerator="Ctrl+Q", command=self.on_close)
@@ -292,11 +293,13 @@ class DesktopApp(tk.Tk):
         info = boot.prepare()
         messagebox.showinfo(
             "关于 QuantTrading Studio",
-            "%s\n\n版本：桌面版 %s / 核心 %s\nPython：%s\n打包运行：%s\n数据目录：\n%s\n\n"
+            "%s\n\n版本：桌面版 %s / 核心 %s\nPython：%s\n打包运行：%s\n"
+            "数据目录：\n%s\n策略目录：\n%s\n\n"
             "行情来自公开接口（新浪/腾讯/东方财富），仅供个人研究学习；\n"
             "本程序默认只做研究与模拟交易，不会向券商发送真实委托。" % (
                 APP_TITLE, __version__, _core_version(), info["python"],
-                "是" if info["frozen"] else "否（源码运行）", info["data_dir"]),
+                "是" if info["frozen"] else "否（源码运行）",
+                info["data_dir"], info.get("strategies_dir") or "（包内目录）"),
             parent=self)
 
     def show_self_check(self) -> None:
@@ -341,6 +344,7 @@ class DesktopApp(tk.Tk):
             lines.append("")
             lines.append("缓存目录：%s" % (self.services.settings.cache_dir,))
             lines.append("数据目录：%s" % (self.services.settings.data_dir,))
+            lines.append("策略目录：%s" % _strategies_dir())
             return "\n".join(str(line) for line in lines)
 
         self.tasks.run(collect, on_done=dialog.set_text,
@@ -364,6 +368,10 @@ class DesktopApp(tk.Tk):
 
     def open_data_dir(self) -> None:
         self._open_path(self.services.settings.data_dir)
+
+    def open_strategies_dir(self) -> None:
+        """打开用户策略目录：安装版在安装目录下的 ``strategies/``，复制 .py 进去即可使用。"""
+        self._open_path(_strategies_dir())
 
     def open_docs_dir(self, filename: str = "") -> None:
         repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -426,6 +434,16 @@ def _core_version() -> str:
         import quantstudio
 
         return getattr(quantstudio, "__version__", "未知")
+    except Exception:                                     # noqa: BLE001
+        return "未找到"
+
+
+def _strategies_dir() -> str:
+    """用户策略目录（安装版 = 安装目录下的 ``strategies/``；源码运行 = 包内 ``local/``）。"""
+    try:
+        from quantstudio.strategies.registry import LOCAL_DIR
+
+        return LOCAL_DIR
     except Exception:                                     # noqa: BLE001
         return "未找到"
 

@@ -90,18 +90,17 @@ class ToolContext:
     @property
     def repo_root(self) -> str:
         """仓库根目录（``docs/``、``README.md`` 都在这里；文档资源从这里读）。"""
-        from ..strategies.registry import LOCAL_DIR
-
-        # 源码布局：``<repo>/backend/quantstudio/strategies/local``（往上 4 层才是仓库根）；
-        # PyInstaller 打包后：``<_MEIPASS>/quantstudio/strategies/local``（往上 3 层就是包根）。
-        # 直接按固定层数算会在打包后算到「包根的父目录」，导致 docs/ 找不到 —— 所以改成
-        # 向上找「含 docs/ 的目录」；找不到再退回源码布局的仓库根。
-        path = LOCAL_DIR
+        # 从**包目录**（``.../quantstudio``）往上找「含 docs/ 的目录」：
+        #   源码布局：``<repo>/backend/quantstudio`` → ``<repo>``（含 docs/）；
+        #   PyInstaller 打包：``<_MEIPASS>/quantstudio`` → ``<_MEIPASS>``（含 docs/）。
+        # 不用 LOCAL_DIR 往上找：安装版把用户策略目录放到了安装目录下，与包位置无关。
+        path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         for _ in range(3):
-            path = os.path.dirname(path)
-            if os.path.isdir(os.path.join(path, "docs")):
-                return path
-        return os.path.dirname(path)
+            parent = os.path.dirname(path)
+            if os.path.isdir(os.path.join(parent, "docs")):
+                return parent
+            path = parent
+        return path
 
     # ------------------------------------------------------------------ 写保护
     def write_guard(self, tool: str, args: Optional[dict] = None) -> None:

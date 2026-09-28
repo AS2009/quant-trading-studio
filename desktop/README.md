@@ -69,10 +69,16 @@ Get-Content "$env:TEMP\quantstudio_selftest.txt"
 
 ## 3. 数据放在哪
 
-* **源码运行**：仓库里的 `backend/data/`（缓存 `cache/`、自有 CSV `csv/`、持仓与模拟盘账本）。
-* **打包运行**：`%LOCALAPPDATA%\QuantTradingStudio\data`（macOS `~/Library/Application Support/...`，
-  Linux `~/.local/share/...`）—— 不会写进程序目录，避免 Program Files 只读导致的失败。
-* 覆盖方式：环境变量 `QUANTSTUDIO_DATA_DIR=D:\qs-data`。
+* **源码运行**：仓库里的 `backend/data/`（缓存 `cache/`、自有 CSV `csv/`、持仓与模拟盘账本），
+  脚本策略放 `backend/quantstudio/strategies/local/`（开发期布局不变）。
+* **打包运行**：用户数据**就在程序所在目录**，按类分文件夹 —— `strategies\`（策略 .py，复制进去就能用）、
+  `data\csv\`（行情 CSV）、`data\level2\`（盘口 CSV）、`data\cache\`（缓存，可随便删）、
+  `data\`（自选池 / 持仓 / 模拟盘账本等 JSON）。首次启动会播种内置示例策略与各文件夹说明；旧版本
+  （≤ v1.5.0）放在用户目录的数据会**复制**过来（原位置保留，`cache\` 不迁移）。
+* 程序目录不可写时（Program Files 未放开权限 / 只读介质 / macOS `.app` 包内）自动退回用户目录：
+  Windows `%LOCALAPPDATA%\QuantTradingStudio\data`（策略目录 `…\QuantTradingStudio\strategies`）、
+  macOS `~/Library/Application Support/...`、Linux `~/.local/share/...`。
+* 覆盖方式：环境变量 `QUANTSTUDIO_DATA_DIR=D:\qs-data`（策略目录 `QUANTSTUDIO_STRATEGIES_DIR`）。
 * 常用开关（见 `backend/quantstudio/config.py`）：`QUANTSTUDIO_DATA_SOURCE=auto|sina|eastmoney|csv|sample`、
   `QUANTSTUDIO_OFFLINE=1`（只用本地缓存/CSV，不发网络请求）。
 
@@ -90,7 +96,7 @@ Get-Content "$env:TEMP\quantstudio_selftest.txt"
 | `Ctrl+Q` | 退出（会等待后台任务收尾） |
 | `Esc` | 关闭弹窗（自检 / 日志 / 策略详情等只读对话框） |
 
-菜单栏还有：文件（刷新、打开数据目录/文档目录、退出）、视图（六个页面）、
+菜单栏还有：文件（刷新、打开数据目录/策略目录/文档目录、退出）、视图（六个页面）、
 工具（数据源自检、清空回测缓存、重置模拟盘账户）、帮助（关于、如何编写策略）。
 
 ---

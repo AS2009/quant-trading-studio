@@ -13,15 +13,43 @@
     3. 或直接双击安装目录里的 QuantTradingStudio.exe。
 
 三、用户数据放在哪（重要）
-    自选池、策略、模拟盘账本、回测缓存都在：
+    自选池、策略、模拟盘账本、行情导入文件都在**程序所在目录**（安装版 = 安装目录；
+    免安装 zip / 单文件 exe = 程序所在目录），按类别分文件夹：
 
-        %LOCALAPPDATA%\QuantTradingStudio\data
+        strategies\        你的策略（*.py）—— 复制进去就能用
+        data\csv\          行情 CSV（自备 / 导入）
+        data\level2\       盘口 / 逐笔 CSV（<代码>.orderbook.csv / <代码>.ticks.csv）
+        data\cache\        程序缓存（可随便删）
+        data\              watchlist.json 自选池、portfolio.json 持仓账本、
+                           paper_account.json 模拟盘账户、user_strategies.json 界面
+                           「新建策略」建的参数化策略、equity_history.json、holidays.json（可选）
 
-    也就是 C:\Users\<你的用户名>\AppData\Local\QuantTradingStudio\data
-    （想换位置：设置环境变量 QUANTSTUDIO_DATA_DIR 指向别的目录再启动。）
+    怎么放策略：把写好的 .py 复制进 strategies\，重启程序或在「策略」页点「刷新」即可看到；
+    文件名以 _ 开头的文件不会被加载（_template.py 就是模板，复制一份改名再用）。
+    首次启动会把内置示例策略（breakout_atr.py / macd_adx.py / rotation_topn.py）与模板复制进来；
+    目录里已有任何 .py 时不再复制，所以删掉的示例不会「复活」。
 
-    **卸载时默认不会删这些数据** —— 只删程序目录。卸载向导会额外问一句「是否同时删除用户数据」，
-    默认是「否」；静默卸载（/VERYSILENT）一律保留数据。
+    怎么放数据：行情 CSV 放 data\csv\（列名规范见 backend\data\README.md）；盘口 / 逐笔 CSV 放
+    data\level2\（列名见 docs\level2.md）。每个可导入文件夹里都有一份中文
+    「说明-把××复制到这里.txt」，照着做即可。
+
+    启动自检会显示用的是哪一种目录（「目录模式」）：「程序目录（安装/解压目录）」；
+    如果程序目录不可写（例如装到 Program Files 又没放开权限、只读介质、macOS .app 包内），
+    会自动退回用户目录（自检里显示「用户目录（程序目录不可写）」）：Windows
+    %LOCALAPPDATA%\QuantTradingStudio\data（策略目录 …\QuantTradingStudio\strategies）、
+    macOS ~/Library/Application Support/QuantTradingStudio/data。
+    安装包已给 strategies\、data\ 放开 Users 修改权限，所以即使「为所有用户安装」到
+    Program Files，普通用户也能直接往里复制文件。「关于」对话框与自检信息里可以看到
+    「数据目录」「策略目录」的完整路径。
+
+    旧版本（≤ v1.5.0）放在 %LOCALAPPDATA%\QuantTradingStudio\data 的数据，程序首次启动会
+    **复制**到新位置（原位置保留；缓存 cache\ 不迁移），只迁移一次且不覆盖新位置已有文件。
+
+    想换位置：环境变量仍然优先 —— QUANTSTUDIO_DATA_DIR（数据目录）、
+    QUANTSTUDIO_STRATEGIES_DIR（策略目录）、QUANTSTUDIO_LEVEL2_DIR
+    （盘口导入目录，默认 <数据目录>\level2）。
+
+    升级：直接覆盖安装（沿用上次的安装目录），数据原样不动。
 
 四、数据来源与边界（免费源，请知悉）
     * 行情来自公开网页接口（腾讯 / 新浪 / 同花顺），**不是**付费 Level-2；
@@ -33,6 +61,8 @@
 五、卸载
     开始菜单 →「卸载 QuantTrading Studio」，或
     设置 → 应用 → 已安装的应用 →「QuantTrading Studio」→ 卸载。
+    交互式卸载会问一句「是否同时删除用户数据」，默认是「否」；静默卸载一律保留。
+    strategies\ 与 data\ 目录带 uninsneveruninstall，空了也不会被卸载器删掉。
 
 六、命令行参数（安装目录里直接跑 exe 时可用）
     QuantTradingStudio.exe --selftest        自检（数据源 / 策略 / 回测），退出码 0/1

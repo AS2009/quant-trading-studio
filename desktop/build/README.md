@@ -81,15 +81,19 @@ powershell -ExecutionPolicy Bypass -File desktop\build\build_installer.ps1 -Skip
 | 事项 | 说明 |
 |---|---|
 | 安装位置 | 默认**按当前用户**装（`PrivilegesRequired=lowest`，不弹 UAC）→ `%LOCALAPPDATA%\Programs\QuantTrading Studio`；向导里可切换「为所有用户安装」（会提权，装到 Program Files） |
+| 用户数据 | 在**安装目录内**：`strategies\`（策略 .py，复制进去即用）+ `data\`（`csv\` / `level2\` / `cache\` / 账本 JSON）；`[Dirs]` 给这两棵树放开 `users-modify`，所以「为所有用户安装」到 Program Files 后普通用户也能写入；程序目录不可写时自动退回用户目录（Windows `%LOCALAPPDATA%\QuantTradingStudio\data` + `…\strategies`，macOS `~/Library/Application Support/QuantTradingStudio/data`） |
 | 快捷方式 | 开始菜单「QuantTrading Studio」组：主程序 + 安装与数据说明 + 卸载；另有可选桌面快捷方式（安装时可勾） |
-| 卸载 | Inno 自动登记到「应用和卸载」（图标/版本/发布者齐全）；卸载只删程序目录，**默认保留用户数据**（交互式会多问一句，默认「否」） |
-| 升级 | `AppId` 固定 + `UsePreviousAppDir`：覆盖安装会沿用上次的安装目录 |
+| 卸载 | Inno 自动登记到「应用和卸载」（图标/版本/发布者齐全）；卸载只删程序文件（主程序与 `_internal\`），**默认保留安装目录下的 `strategies\` 与 `data\`**（交互式会多问一句「是否同时删除用户数据」，默认「否」；静默卸载一律保留；`[Dirs]` 带 `uninsneveruninstall`，空目录也不删；旧位置 `%LOCALAPPDATA%\QuantTradingStudio` 仅在选「是」时一并清掉） |
+| 升级 | `AppId` 固定 + `UsePreviousAppDir`：覆盖安装会沿用上次的安装目录（数据在安装目录里，天然沿用、不动） |
 | 编码 | `quantstudio.iss` / `build_installer.ps1` 都是 **UTF-8 带 BOM**（Inno 与 PowerShell 5.1 都要求，否则中文乱码） |
 | 向导语言 | 主界面是 Inno 自带英文（官方没带简体中文语言包），我们自己的字符串（任务说明、启动项、卸载提示）是中文 |
 
-`build_installer.ps1` 的「安装包自检」不是走形式：它真的静默装一遍、跑装好后的 `--selftest`、
-再静默卸载，并**断言程序目录被删掉而 `%LOCALAPPDATA%\QuantTradingStudio` 还在** ——
-CI 每次都会跑（`build-desktop` 工作流的「构建并自检 Windows 安装包」那一步）。
+`build_installer.ps1` 的「安装包自检」不是走形式：它真的静默装一遍 → 断言安装目录里 `strategies\` 与
+`data\{csv,level2}` 已建好 → 跑装好后的 `--selftest`（报告里的「目录模式」必须是「程序目录（安装/解压目录）」、策略目录必须是
+安装目录下的 `strategies`，且首次启动已播种内置示例）→ 把 `_template.py` 复制成 `setup_probe.py` 再跑一次
+自检，断言报告里出现 `st_setup_probe`（证明「复制进去就能用」）→ 静默卸载，断言主程序与 `_internal\`
+已消失、而 `strategies\setup_probe.py` 与 `data\csv` 仍在。CI 每次都会跑（`build-desktop` 工作流的
+「构建并自检 Windows 安装包」那一步）。
 
 ### macOS（正式产物：`.app` + zip + dmg）
 
@@ -199,26 +203,39 @@ PyInstaller 的引导器（bootloader）被大量恶意样本共用，误报很�
 python.org 安装包或系统 `/usr/bin/python3`（Homebrew 的 python 默认无 Tk）。
 
 **Q3. 打包后的程序把数据写到哪里？**
-用户数据目录（不在程序目录，避免 Program Files 只读）：
+用户数据**就在程序所在目录**（安装版 = 安装目录；zip / 单文件 = exe 所在目录），按类别分文件夹：
 
-| 平台 | 默认位置 |
+| 路径 | 内容 |
 |---|---|
-| Windows | `%LOCALAPPDATA%\QuantTradingStudio\data` |
+| `strategies\` | 自定义策略 `.py`（复制进去即可用；`_` 开头的文件不加载） |
+| `data\csv\` | 行情 CSV（按 `backend/data/README.md` 的列名规范） |
+| `data\level2\` | 盘口 / 逐笔 CSV（`<代码>.orderbook.csv` / `<代码>.ticks.csv`，见 `docs/level2.md`） |
+| `data\cache\` | 程序缓存（可随便删） |
+| `data\` | 自选池 `watchlist.json`、持仓 `portfolio.json`、模拟盘 `paper_account.json` 等 |
+
+首次启动会播种内置示例策略与各文件夹的中文说明文件；旧版本（≤ v1.5.0）放在用户目录的数据会**复制**
+过来（原位置保留，`cache\` 不迁移）。程序目录不可写时（Program Files 未放开权限 / 只读介质 / macOS
+`.app` 包内）自动退回用户目录：
+
+| 平台 | 回退位置（仅程序目录不可写时） |
+|---|---|
+| Windows | `%LOCALAPPDATA%\QuantTradingStudio\data`（策略目录 `…\QuantTradingStudio\strategies`） |
 | macOS | `~/Library/Application Support/QuantTradingStudio/data` |
 | Linux | `$XDG_DATA_HOME/QuantTradingStudio/data`（默认 `~/.local/share/...`） |
 
-可用环境变量 `QUANTSTUDIO_DATA_DIR` 覆盖；缓存/CSV/持仓/模拟盘账本都在里面。
-源码运行则用仓库的 `backend/data/`。
+可用环境变量 `QUANTSTUDIO_DATA_DIR` / `QUANTSTUDIO_STRATEGIES_DIR` 覆盖；缓存/CSV/持仓/模拟盘账本都在里面。
+源码运行则用仓库的 `backend/data/`，脚本策略放 `backend/quantstudio/strategies/local/`。
 
 **Q4. 首次启动很慢 / 体积大**
 onefile 每次启动都要把内容解压到 `%TEMP%\_MEIxxxx`（首次最慢，杀软实时扫描会再拖几秒）；
 onedir 无此开销，直接加载同目录 DLL。追求启动速度就发布 onedir。
 
 **Q5. 怎么加自定义策略？**
-把符合 `docs/strategy-spec.md` 的 `<slug>.py` 放进 `backend/quantstudio/strategies/local/`
-（文件名 = 策略 id 去掉 `st_` 前缀；`_` 开头的文件不加载），然后：
-`python scripts/check_strategies.py` 校验 → **重新打包**（spec 会自动扫描该目录并加进
-`hiddenimports` + `datas`，无需改 spec）。运行期可在「策略管理」页看到 `origin=local` 的策略。
+打包版（安装版 / zip / 单文件）：把符合 `docs/strategy-spec.md` 的 `<slug>.py` 直接复制进程序目录的
+`strategies\`（文件名 = 策略 id 去掉 `st_` 前缀；`_` 开头的文件不加载；首次启动会播种 `_template.py`
+模板与内置示例），重启程序或在「策略管理」页点「刷新」即可看到 `origin=local` 的策略——**不用重新打包**。
+源码运行才放 `backend/quantstudio/strategies/local/`，改完重启即可（打包时 spec 会从该目录收集内置
+示例与模板并加进 `hiddenimports` + `datas`，所以改仓库里的示例才需要重新打包）。
 
 **Q6. 怎么换图标？**
 把多尺寸的 `icon.ico`（建议含 16/32/48/256）放到 `desktop/build/icon.ico` 即可，spec 会自动使用；

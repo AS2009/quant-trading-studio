@@ -174,8 +174,9 @@ jobs:
           if (-not $iscc) { throw "没装上 Inno Setup（找不到 ISCC.exe）" }
           Write-Host "ISCC：$iscc（$((Get-Item $iscc).VersionInfo.ProductVersion)）"
 
-      # 安装包自检：静默安装到临时目录 → 检查开始菜单/卸载登记 → 跑装好后的 --selftest
-      #             → 静默卸载 → 断言程序目录已删、用户数据保留
+      # 安装包自检：静默安装到临时目录 → 检查开始菜单/卸载登记 → 断言 strategies\ 与 data\{csv,level2} 已建好
+      #             → 跑装好后的 --selftest → 手工复制一份策略进 strategies\ 再自检（验证「复制进去就能用」）
+      #             → 静默卸载 → 断言程序文件已删、用户数据（strategies\、data\）保留
       - name: 构建并自检 Windows 安装包（Inno Setup）
         shell: pwsh
         run: |
@@ -187,6 +188,10 @@ jobs:
           $ErrorActionPreference = "Stop"
           $artifacts = "desktop/build/output/artifacts"
           New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
+          # v1.5.1 起自检会把用户数据（data\、strategies\）写在程序目录里：打包前清掉，
+          # 别把 CI 跑出来的缓存/自选池/播种策略混进发行 zip（用户首次启动会自己生成）
+          $distDir = "desktop/build/output/dist/QuantTradingStudio"
+          Remove-Item -Recurse -Force "$distDir\data", "$distDir\strategies" -ErrorAction SilentlyContinue
           Compress-Archive -Path "desktop/build/output/dist/QuantTradingStudio" `
                            -DestinationPath "$artifacts/QuantTradingStudio-windows-x64.zip" -Force
           Copy-Item "desktop/build/output/dist-onefile/QuantTradingStudio.exe" `
