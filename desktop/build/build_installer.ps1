@@ -255,7 +255,21 @@ else {
         throw "自检报告里的策略目录不是安装目录下的 strategies：$installedStrategies"
     }
     $seeded = @(Get-ChildItem $installedStrategies -Filter *.py -ErrorAction SilentlyContinue)
-    if ($seeded.Count -lt 1) { throw "首次启动没有把内置示例策略放进 strategies\（播种失败）" }
+    if ($seeded.Count -lt 1) {
+        # 诊断：目标目录里有什么、包内示例目录是否存在（不同打包布局落点不同）
+        Write-Host "   策略目录内容:"
+        Get-ChildItem $installedStrategies -Force -ErrorAction SilentlyContinue |
+            Select-Object -First 10 -ExpandProperty Name | ForEach-Object { Write-Host "     - $_" }
+        foreach ($cand in @((Join-Path $TestDir "_internal\quantstudio\strategies\local"),
+                            (Join-Path $TestDir "_internal\quantstudio\strategies"))) {
+            Write-Host ("   包内路径 {0} 存在={1}" -f $cand, (Test-Path $cand))
+            if (Test-Path $cand) {
+                Get-ChildItem $cand -Force | Select-Object -First 10 -ExpandProperty Name |
+                    ForEach-Object { Write-Host "     * $_" }
+            }
+        }
+        throw "首次启动没有把内置示例策略放进 strategies\（播种失败；上面是诊断）"
+    }
     Write-Host ("   内置示例    : 已播种 {0} 个 .py ✅" -f $seeded.Count)
 
     Write-Host "-> 手工复制一份策略进 strategies\，再跑自检（验证「复制进去就能用」）"

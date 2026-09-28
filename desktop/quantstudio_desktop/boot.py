@@ -164,12 +164,45 @@ def user_strategies_dir(app_name: str = "QuantTradingStudio") -> str:
     return os.path.join(os.path.dirname(user_data_dir(app_name)), STRATEGIES_DIRNAME)
 
 
+def core_strategies_candidates() -> List[str]:
+    """包内自带策略目录的**候选**位置（不同打包布局落点不同，全部试一遍）。
+
+    * onedir(Windows)：``<_MEIPASS>\\quantstudio\\strategies\\local``；
+    * macOS .app：``_MEIPASS`` 指向 ``Contents/Frameworks``，而数据文件可能在
+      ``Contents/Resources``（PyInstaller 6 两者互为软链接，但别赌这一点）；
+    * 源码运行：``<仓库>/backend/quantstudio/strategies/local``。
+    """
+    candidates: List[str] = []
+
+    def add(path: str) -> None:
+        if path and path not in candidates:
+            candidates.append(path)
+
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("quantstudio.strategies.local")
+        for folder in list(getattr(spec, "submodule_search_locations", None) or []):
+            add(str(folder))
+    except Exception:                                     # noqa: BLE001 - 只是找示例，失败不致命
+        pass
+    roots = [item for item in (ensure_core_path(), getattr(sys, "_MEIPASS", "")) if item]
+    for root in roots:
+        add(os.path.join(root, "quantstudio", "strategies", "local"))
+        add(os.path.abspath(os.path.join(root, os.pardir, "Resources",
+                                         "quantstudio", "strategies", "local")))
+    return candidates
+
+
 def core_strategies_dir() -> str:
-    """包内自带的策略目录（内置示例 / 模板），用于首次启动时「播种」到用户目录。"""
-    core = ensure_core_path()
-    if not core:
-        return ""
-    return os.path.join(core, "quantstudio", "strategies", "local")
+    """包内自带的策略目录（内置示例 / 模板）：返回**第一个确实含 .py 的**候选目录。"""
+    for folder in core_strategies_candidates():
+        try:
+            if os.path.isdir(folder) and any(name.endswith(".py") for name in os.listdir(folder)):
+                return folder
+        except OSError:
+            continue
+    return ""
 
 
 # ====================================================================== 目录布局
@@ -260,6 +293,14 @@ def migrate_legacy_data(data_dir: str) -> bool:
     return _copy_tree(legacy, data_dir, skip=("cache",)) > 0
 
 
+def _has_py_file(folder: str) -> bool:
+    """目录里有没有 ``.py``（读不到就当没有）。"""
+    try:
+        return any(name.endswith(".py") for name in os.listdir(folder))
+    except OSError:
+        return False
+
+
 def seed_strategies(strategies_dir: str) -> int:
     """首次启动时把包内自带策略（示例 + 模板）复制到用户策略目录。
 
@@ -344,6 +385,10 @@ def prepare_dirs() -> Dict[str, object]:
                 seeded = seed_strategies(strategies_dir)
             except OSError:
                 notes.append("策略目录不可写，未能放入示例策略：%s" % strategies_dir)
+            if seeded == 0 and not _has_py_file(strategies_dir):
+                # 打包布局变了 / 示例没打进包：如实写进报告，别让「示例不见了」变成无声故障
+                notes.append("未找到包内示例策略（候选目录：%s）"
+                             % "、".join(core_strategies_candidates() or ["（无）"]))
         notes.extend("已生成说明文件：%s" % path for path in write_folder_notes(str(resolved["root"])))
     resolved["migrated"] = migrated
     resolved["seeded"] = seeded
