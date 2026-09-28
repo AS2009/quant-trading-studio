@@ -71,22 +71,21 @@ class TestRealDataPath(unittest.TestCase):
         for date, close in short.items():
             self.assertIn(date, long_, "长窗口缺少短窗口的日期 %s" % date)
             other = long_[date]
-            if same_source:
-                self.assertAlmostEqual(close, other, places=2,
-                                       msg="同一日期 %s 在源 %s 的两个窗口下价格不同：%.2f vs %.2f"
-                                           % (date, short_source, close, other))
-            else:
-                gap = abs(close - other) / close
-                if gap > 0.03:
-                    # 跨源且差异远超「前复权分红因子更新时点不同」的量级（实测约 1%）：说明某一个免费源
-                    # 这一次返回了互相矛盾的数据（第三方瞬时问题），不是我们的窗口逻辑出错。
-                    # 如实跳过并写明细节，别把「源的数据坏了」伪装成「窗口长度扭曲」。
-                    # 自查办法：同一标的用 adjust=none 取原价，看哪一家的 qfq 与原价对得上。
-                    self.skipTest("跨源数据不一致：%s=%s vs %s=%s（日期 %s 差 %.2f%%），疑似第三方源本次异常"
-                                  % (short_source, close, long_source, other, date, gap * 100))
-                self.assertLess(gap, 0.03,
-                                "两个窗口分别来自不同数据源（%s vs %s），日期 %s 价差 %.2f%%：%.2f vs %.2f"
-                                % (short_source, long_source, date, gap * 100, close, other))
+            gap = abs(close - other) / close
+            # 同源：允许「最新价实时跳动」造成的**整体缩放**抖动。口径是「末根 == 今日真实价」，
+            # 所以盘中每跳一次，整条序列按同一个 k 微微平移（实测 ~0.01%，两次调用之间就变了）；
+            # 真正的「窗口长度扭曲」是百分之几到几十的量级，用 0.1% 就能卡住。
+            tolerance = 0.001 if same_source else 0.03
+            if not same_source and gap > tolerance:
+                # 跨源且差异远超「前复权分红因子更新时点不同」的量级（实测约 1%）：说明某一个免费源
+                # 这一次返回了互相矛盾的数据（第三方瞬时问题），不是我们的窗口逻辑出错。
+                # 如实跳过并写明细节，别把「源的数据坏了」伪装成「窗口长度扭曲」。
+                # 自查办法：同一标的用 adjust=none 取原价，看哪一家的 qfq 与原价对得上。
+                self.skipTest("跨源数据不一致：%s=%s vs %s=%s（日期 %s 差 %.2f%%），疑似第三方源本次异常"
+                              % (short_source, close, long_source, other, date, gap * 100))
+            self.assertLess(gap, tolerance,
+                            "同一日期 %s 在两个窗口下价差 %.3f%%（源 %s vs %s）：%.2f vs %.2f"
+                            % (date, gap * 100, short_source, long_source, close, other))
 
     def test_snapshot_matches_kline_tail(self):
         bars = self.provider.kline(STOCK, days=5)
