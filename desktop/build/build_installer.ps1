@@ -244,12 +244,12 @@ else {
     Invoke-GuiSelftest -ExePath $installedExe -Argument "--selftest"
     $report = if (Test-Path $ReportPath) { Get-Content $ReportPath -Raw -Encoding UTF8 } else { "" }
     # 「程序目录」这四个字在 user 模式的文案里也有（「用户目录（程序目录不可写）」），
-    # 所以必须断言到具体路径 + 「安装/解压目录」这个 install 模式专属说法
+    # 所以断言到具体路径；模式则用 ASCII 的原始取值判（中文在不同编码下可能读成乱码）
     if ($report -notmatch [regex]::Escape($installedData)) {
         throw "自检报告里的数据目录不是安装目录下的 data：$installedData"
     }
-    if ($report -notmatch "安装/解压目录") {
-        throw "自检报告的目录模式不是「程序目录（安装/解压目录）」（install 模式判定没生效？）"
+    if ($report -notmatch "\(install\)") {
+        throw "自检报告的目录模式不是 install（数据没落在程序目录里？报告：$ReportPath）"
     }
     if ($report -notmatch [regex]::Escape($installedStrategies)) {
         throw "自检报告里的策略目录不是安装目录下的 strategies：$installedStrategies"

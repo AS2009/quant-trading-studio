@@ -130,8 +130,10 @@ def _run_selftest(symbol: str = "600519.SH") -> int:
     print("核心包目录 :", info["core_dir"])
     print("数据目录   :", info["data_dir"])
     print("策略目录   :", info.get("strategies_dir") or "（包内 strategies/local）")
+    _mode = str(info.get("mode") or "?")
     print("目录模式   :", {"install": "程序目录（安装/解压目录）", "user": "用户目录（程序目录不可写）",
-                          "source": "源码运行", "explicit": "环境变量指定"}.get(str(info.get("mode")), "未知"))
+                          "source": "源码运行", "explicit": "环境变量指定"}.get(_mode, "未知"),
+          "(%s)" % _mode)                      # 带上原始取值，方便日志/自检脚本用 ASCII 判读
     for note in info.get("notes") or []:
         print("提示       :", note)
 

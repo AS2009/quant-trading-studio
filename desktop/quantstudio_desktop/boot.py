@@ -62,6 +62,29 @@ _FOLDER_NOTES: Tuple[Tuple[str, str, str], ...] = (
      "  3. 列名规范见 docs/level2.md。\n"),
 )
 
+#: 我们自己写进环境变量的值（核心包只认环境变量，但「用户显式指定」必须与我们导出的区分开 ——
+#: 否则 prepare() 第二次调用就会把安装目录误报成「环境变量指定」）
+_exported: Dict[str, str] = {}
+
+
+def _explicit_env(name: str) -> str:
+    """``name`` 里**用户自己**设置的值；我们自己导出过的值不算显式指定。"""
+    value = os.environ.get(name, "").strip()
+    if value and value == _exported.get(name, ""):
+        return ""
+    return value
+
+
+def _export_env(name: str, value: str) -> None:
+    """把路径导出给核心包（已有用户值时不动），并记住这个值是我们写的。"""
+    if not value:
+        return
+    if not os.environ.get(name):
+        os.environ[name] = value
+    if os.environ.get(name) == value:
+        _exported[name] = value
+
+
 
 def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
@@ -160,8 +183,8 @@ def layout() -> Dict[str, object]:
     * ``mode="user"``    打包运行但程序目录不可写 → 退回用户目录（macOS .app、装到 Program Files 且无权限）；
     * ``mode="explicit"`` 用户显式设置了 ``QUANTSTUDIO_DATA_DIR``（测试隔离 / 多份数据并存）。
     """
-    explicit_data = os.environ.get("QUANTSTUDIO_DATA_DIR", "").strip()
-    explicit_strategies = os.environ.get("QUANTSTUDIO_STRATEGIES_DIR", "").strip()
+    explicit_data = _explicit_env("QUANTSTUDIO_DATA_DIR")
+    explicit_strategies = _explicit_env("QUANTSTUDIO_STRATEGIES_DIR")
 
     if explicit_data:
         return {"root": os.path.dirname(os.path.abspath(explicit_data)), "data_dir": explicit_data,
@@ -292,10 +315,9 @@ def ensure_data_dir() -> str:
     except OSError:
         data_dir = os.path.join(os.path.expanduser("~"), ".quantstudio", "data")
         os.makedirs(data_dir, exist_ok=True)
-    os.environ.setdefault("QUANTSTUDIO_DATA_DIR", data_dir)
+    _export_env("QUANTSTUDIO_DATA_DIR", data_dir)
     strategies_dir = str(resolved["strategies_dir"] or "")
-    if strategies_dir:
-        os.environ.setdefault("QUANTSTUDIO_STRATEGIES_DIR", strategies_dir)
+    _export_env("QUANTSTUDIO_STRATEGIES_DIR", strategies_dir)
     return data_dir
 
 
@@ -308,8 +330,7 @@ def prepare_dirs() -> Dict[str, object]:
     data_dir = ensure_data_dir()
     resolved["data_dir"] = data_dir
     strategies_dir = str(resolved["strategies_dir"] or "")
-    if strategies_dir:
-        os.environ.setdefault("QUANTSTUDIO_STRATEGIES_DIR", strategies_dir)
+    _export_env("QUANTSTUDIO_STRATEGIES_DIR", strategies_dir)
     migrated = False
     seeded = 0
     notes: List[str] = []

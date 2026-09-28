@@ -209,6 +209,21 @@ class BootLayoutTest(unittest.TestCase):
         finally:
             os.chmod(target, 0o755)
 
+    def test_prepare_twice_keeps_install_mode(self):
+        """打包版的真实调用序列：``__init__`` 与自检各调一次 ``prepare()``。
+
+        我们自己导出的 ``QUANTSTUDIO_DATA_DIR`` 不能被第二次 ``layout()`` 当成「用户显式指定」，
+        否则自检报告里会写「环境变量指定」——CI 的安装包自检就是靠这句判 install 模式。
+        """
+        program = self._mk("qs-install-")
+        self._frozen(program)
+        first = boot.prepare_dirs()
+        second = boot.prepare_dirs()
+        self.assertEqual(first["mode"], "install")
+        self.assertEqual(second["mode"], "install", "第二次 prepare 仍应是 install，不能变成 explicit")
+        self.assertEqual(second["data_dir"], os.path.join(program, "data"))
+        self.assertEqual(second["strategies_dir"], os.path.join(program, "strategies"))
+
     # ------------------------------------------------------------------ 显式覆盖
     def test_explicit_env_wins(self):
         program = self._mk("qs-install-")
