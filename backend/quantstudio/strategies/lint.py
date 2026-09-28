@@ -565,11 +565,23 @@ _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))            # .../quant
 _PACKAGE_ROOT = os.path.dirname(_PACKAGE_DIR)                        # .../quantstudio
 
 
+def _safe_relpath(path: str, start: str) -> Optional[str]:
+    """``os.path.relpath`` 的容错版：Windows 上两个路径在不同盘符（C:/D:）时会抛 ValueError → 返回 None。
+
+    对包外策略目录尤其重要：用户可以把它指到别的盘（``QUANTSTUDIO_STRATEGIES_DIR=D:\策略``），
+    这时算不出相对路径，但**不能**让校验直接崩掉。
+    """
+    try:
+        return os.path.relpath(path, start)
+    except ValueError:
+        return None
+
+
 def _package_module_name(path: str) -> Optional[str]:
     """把包内文件路径映射为可导入的模块名（策略文件使用相对导入，必须按包导入）。"""
     root = os.path.dirname(_PACKAGE_ROOT)                            # .../backend
-    rel = os.path.relpath(os.path.abspath(path), root)
-    if rel.startswith("..") or not rel.endswith(".py"):
+    rel = _safe_relpath(os.path.abspath(path), root)
+    if rel is None or rel.startswith("..") or not rel.endswith(".py"):
         return None
     parts = rel[:-3].split(os.sep)
     if parts and parts[-1] == "__init__":
@@ -689,7 +701,10 @@ def lint_all(smoke: bool = True) -> Dict[str, Any]:
 def _print_text(report: Dict[str, Any]) -> None:
     for item in report.get("reports", [report]):
         mark = "OK  " if item["ok"] else "FAIL"
-        rel = os.path.relpath(item["path"], os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        parent = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        rel = _safe_relpath(item["path"], parent)
+        if rel is None or rel.startswith(".."):
+            rel = item["path"]              # 包外 / 跨盘符：直接给绝对路径，别显示一串 ../..
         print("%s %s%s" % (mark, rel, ("  [%s]" % ", ".join(item["classes"])) if item.get("classes") else ""))
         for issue in item.get("errors", []):
             print("   ✗ %-18s %s%s" % (issue["code"], issue["message"], " (line %s)" % issue["line"] if issue["line"] else ""))

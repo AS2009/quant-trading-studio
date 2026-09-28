@@ -928,8 +928,15 @@ class TencentLiveTest(unittest.TestCase):
             self.skipTest("腾讯板块不可用：%s" % exc)
         self.assertTrue(rows)
         self.assertTrue(all(item.name for item in rows))
+        self.assertTrue(breadth.source, "广度数据的来源标记不能为空")
+        # 盘前（北京时间约 09:15 前）腾讯还没给出当日涨跌家数与成交额，返回 0 是**正常的**，
+        # 不是数据源故障：这时只校验接口结构（上面几行），数值断言跳过并在日志里说明。
+        if breadth.total <= 0 or breadth.total_amount_yi <= 0:
+            self.skipTest("盘前数据为空：total=%s、成交额=%s 亿（还没开盘，非数据源故障）"
+                          % (breadth.total, breadth.total_amount_yi))
         self.assertGreater(breadth.total, 1000)                 # 行业板块汇总口径（含新三板）
         self.assertGreater(breadth.total_amount_yi, 1000.0)     # 两市成交额（亿元）
+
 # --------------------------------------------------------------------------- 降级链
 class _FailProvider:
     """所有方法都失败的假数据源。"""
