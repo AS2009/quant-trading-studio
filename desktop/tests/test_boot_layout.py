@@ -25,6 +25,8 @@ import sys
 import tempfile
 import unittest
 
+from unittest import mock  # noqa: E402
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from quantstudio_desktop import boot  # noqa: E402
@@ -36,7 +38,7 @@ BACKEND_DIR = os.path.join(REPO_ROOT, "backend")
 class BootLayoutTest(unittest.TestCase):
     """把 ``boot`` 当成「打包运行」来跑，结束后完整还原解释器状态。"""
 
-    ENV_KEYS = ("QUANTSTUDIO_DATA_DIR", "QUANTSTUDIO_STRATEGIES_DIR", "LOCALAPPDATA", "HOME")
+    ENV_KEYS = ("QUANTSTUDIO_DATA_DIR", "QUANTSTUDIO_STRATEGIES_DIR", "LOCALAPPDATA", "HOME", "USERPROFILE")
     SYS_ATTRS = ("frozen", "_MEIPASS", "executable", "platform")
 
     def setUp(self):
@@ -174,18 +176,38 @@ class BootLayoutTest(unittest.TestCase):
 
     # ------------------------------------------------------------------ 只读程序目录
     def test_readonly_program_dir_falls_back_to_user_dir(self):
+        """程序目录不可写 → 退回用户目录（选择性 mock，跨平台一致：Windows 不认 chmod 权限位）。
+
+        只把**程序目录**判为不可写：用户目录那一段仍走真实探测，否则会连回退位置一起否掉。
+        """
         program = self._mk("qs-readonly-")
         self._frozen(program)
-        os.chmod(program, 0o555)
-        try:
+        program_abs = os.path.abspath(program)
+        real_probe = boot.is_writable_dir
+
+        def probe(path):
+            if os.path.abspath(str(path)).startswith(program_abs):
+                return False
+            return real_probe(path)
+
+        with mock.patch.object(boot, "is_writable_dir", side_effect=probe):
             resolved = boot.prepare_dirs()
-        finally:
-            os.chmod(program, 0o755)
         self.assertEqual(resolved["mode"], "user", "程序目录不可写时必须退回用户目录")
         self.assertEqual(resolved["data_dir"], os.path.join(self.localappdata, "QuantTradingStudio", "data"))
         self.assertEqual(resolved["strategies_dir"],
                          os.path.join(self.localappdata, "QuantTradingStudio", "strategies"))
         self.assertEqual(os.environ["QUANTSTUDIO_STRATEGIES_DIR"], resolved["strategies_dir"])
+
+    @unittest.skipIf(sys.platform == "win32", "Windows 不按 POSIX 权限位判可写，chmod 无效")
+    def test_is_writable_dir_rejects_readonly_dir(self):
+        """真探测函数本身：POSIX 下只读目录必须判为不可写（安装到只读介质的情形）。"""
+        target = self._mk("qs-ro-probe-")
+        self.assertTrue(boot.is_writable_dir(target))
+        os.chmod(target, 0o555)
+        try:
+            self.assertFalse(boot.is_writable_dir(target))
+        finally:
+            os.chmod(target, 0o755)
 
     # ------------------------------------------------------------------ 显式覆盖
     def test_explicit_env_wins(self):
@@ -207,7 +229,9 @@ class BootLayoutTest(unittest.TestCase):
         bundle = self._mk("qs-app-")
         self._frozen(bundle)
         sys.platform = "darwin"                          # type: ignore[attr-defined]
-        os.environ["HOME"] = self.localappdata           # expanduser("~") 指到临时目录，别污染开发机
+        # expanduser("~") 指到临时目录，别污染真机：POSIX 读 HOME，Windows 读 USERPROFILE
+        os.environ["HOME"] = self.localappdata
+        os.environ["USERPROFILE"] = self.localappdata
         resolved = boot.prepare_dirs()
         self.assertEqual(resolved["mode"], "user")
         self.assertEqual(resolved["data_dir"],
