@@ -37,6 +37,7 @@ from ..config import Settings, get_settings
 from ..core.errors import ProviderUnavailable, SymbolNotFound
 from ..core.models import Bar, IndexQuote, MarketBreadth, Quote, SectorQuote
 from . import symbols as sym
+from .base import clean_day, trim_bars
 
 __all__ = ["CsvProvider"]
 
@@ -161,8 +162,19 @@ class CsvProvider:
         ) for item in quotes]
 
     # ================================================================== K 线
-    def kline(self, symbol: str, days: int = 250, freq: str = "day", adjust: str = "qfq") -> List[Bar]:
-        """读取 ``kline/{code}.csv`` 或 ``kline_all.csv``（``volume`` 手、``amount`` 元）。"""
+    def kline(
+        self,
+        symbol: str,
+        days: int = 250,
+        freq: str = "day",
+        adjust: str = "qfq",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+    ) -> List[Bar]:
+        """读取 ``kline/{code}.csv`` 或 ``kline_all.csv``（``volume`` 手、``amount`` 元）。
+
+        ``start`` / ``end`` 在客户端按日期裁剪（CSV 是本地文件，没有服务端区间可传）。
+        """
         try:
             code = sym.normalize(symbol)
         except SymbolNotFound:
@@ -171,6 +183,8 @@ class CsvProvider:
             limit = max(1, int(days))
         except (TypeError, ValueError):
             limit = 250
+        window_start = clean_day(start)
+        window_end = clean_day(end)
 
         rows = self._kline_rows(code)
         bars: List[Bar] = []
@@ -202,7 +216,7 @@ class CsvProvider:
             bars = self._aggregate(bars, 30)
         elif freq_key not in ("day", "daily", "日", "日线"):
             raise ProviderUnavailable("CSV 数据源暂不支持周期 %r（仅 day/week/month）" % (freq,))
-        return bars[-limit:]
+        return trim_bars(bars, window_start, window_end, limit)
 
     def _kline_rows(self, code: str) -> List[Dict[str, str]]:
         digits = code.split(".", 1)[0]

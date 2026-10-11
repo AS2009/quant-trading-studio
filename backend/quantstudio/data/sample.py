@@ -44,6 +44,7 @@ from ..config import BASE_DIR, Settings, get_settings
 from ..core.errors import ProviderUnavailable, SymbolNotFound
 from ..core.models import Bar, IndexQuote, MarketBreadth, Quote, SectorQuote
 from . import symbols as sym
+from .base import clean_day, trim_bars
 
 __all__ = ["SampleProvider", "load_data_engine"]
 
@@ -377,9 +378,18 @@ class SampleProvider:
         return out
 
     # ================================================================== K 线
-    def kline(self, symbol: str, days: int = 250, freq: str = "day", adjust: str = "qfq") -> List[Bar]:
-        """示例 K 线：永远返回固定序列的最后 ``days`` 根（任意 ``days`` 下同日价格一致）。
+    def kline(
+        self,
+        symbol: str,
+        days: int = 250,
+        freq: str = "day",
+        adjust: str = "qfq",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+    ) -> List[Bar]:
+        """示例 K 线：返回固定序列里 ``[start, end]`` 窗口的最后 ``days`` 根。
 
+        不给 ``start`` / ``end`` 时就是最后 ``days`` 根（任意 ``days`` 下同日价格一致）；
         ``freq=week/month`` 由日线序列按自然周 / 自然月聚合得到，同样与该序列自洽。
         """
         code = self._normalize(symbol)
@@ -397,7 +407,7 @@ class SampleProvider:
             series = self._aggregate(series, "week")
         elif freq_key in ("month", "monthly", "月", "月线"):
             series = self._aggregate(series, "month")
-        return series[-limit:]
+        return trim_bars(series, clean_day(start), clean_day(end), limit)
 
     @staticmethod
     def _aggregate(bars: List[Bar], freq: str) -> List[Bar]:

@@ -119,7 +119,7 @@ from ..core.errors import (
 from ..core.models import Bar, IndexQuote, MarketBreadth, OrderBook, Quote, SectorQuote, Tick
 from . import level2
 from . import symbols as sym
-from .base import BaseHTTPProvider
+from .base import BaseHTTPProvider, clean_day
 
 __all__ = ["TencentProvider"]
 
@@ -167,14 +167,33 @@ class TencentProvider(BaseHTTPProvider):
         self.last_notes: List[str] = []
 
     # ================================================================== K 线
-    def kline(self, symbol: str, days: int = 250, freq: str = "day", adjust: str = "qfq") -> List[Bar]:
+    def kline(
+        self,
+        symbol: str,
+        days: int = 250,
+        freq: str = "day",
+        adjust: str = "qfq",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+    ) -> List[Bar]:
         """历史 K 线（按日期升序，最多 ``days`` 根；超长自动往前翻页）。
 
         ``adjust="qfq"`` 返回**乘法前复权**：先按 ``hfq`` 取数，再整体缩放到最新真实价
         （见模块 docstring「复权口径」），所以最后一根收盘 == 今日真实价、所有价格 > 0、
         单日涨跌幅与 ``hfq`` 版本逐项一致；万一腾讯后复权末根不自洽，会按原价比例修正并记口径说明。
+
+        ``start`` / ``end``（``YYYY-MM-DD``）把窗口限定在 ``[start, end]``：
+
+        - ``end`` 走**服务端**（腾讯 ``param`` 的第 4 段就是区间终点），所以「回测到过去的某天」
+          拿到的确实是**截至该日**的窗口，不再出现「取到今天再按日期过滤、窗口整个落空」；
+        - 翻页游标从 ``end``（缺省 = 今天）往前推进，累计到 ``start``（含）之前即可停止，
+          不必为了一个久远的小区间把中间几千根都拉回来。
         """
         self.last_notes = []                   # 每次调用重置：口径说明只在本次响应里生效
+        window_start = clean_day(start)
+        window_end = clean_day(end)
+        if window_start and window_end and window_start > window_end:
+            window_start, window_end = window_end, window_start
         try:
             code = sym.normalize(symbol)
         except SymbolNotFound as exc:
@@ -201,13 +220,15 @@ class TencentProvider(BaseHTTPProvider):
         hfq_key = "%s%s" % (self.ADJUST_PREFIX["hfq"], period)
 
         merged: Dict[str, List[str]] = {}
-        end = ""
+        cursor = window_end or ""
         hit_key = ""
         for _attempt in range(self.MAX_REQUESTS):
+            if window_start and merged and min(merged) <= window_start:
+                break                          # 已回溯到（并越过）请求区间起点
             want = min(limit - len(merged), self.BARS_PER_REQUEST)
             if want <= 0:
                 break
-            param = "%s,%s,,%s,%d,%s" % (tx_symbol, period, end, want, prefix)
+            param = "%s,%s,,%s,%d,%s" % (tx_symbol, period, cursor, want, prefix)
             payload = self._get_json(self.KLINE_URL, params={"param": param})
             node = self._node(payload, tx_symbol)
             page_key, rows = self._kline_section(node, prefix, period)
@@ -224,13 +245,28 @@ class TencentProvider(BaseHTTPProvider):
             if len(rows) < want or len(merged) >= limit or freq_key != "day":
                 break                      # 数据已被服务端截断（或周/月线足够长）
             first_day = min(merged)
-            end = self._prev_day(first_day)
-            if not end:
-                break
+            if window_start and first_day <= window_start:
+                break                          # 已覆盖到起点，再往前翻没有意义
+            step = self._prev_day(first_day)
+            if not step or step == cursor:
+                break                          # 游标无法前进：避免死循环
+            cursor = step
 
         if not merged:
             raise DataSourceError("腾讯未返回 %s 的 K 线数据" % code)
         ordered = [merged[key] for key in sorted(merged)]
+        if window_start or window_end:
+            # 服务端区间是闭区间且按自然日过滤，这里再按交易日精确裁剪一次（含首尾）
+            ordered = [
+                row for row in ordered
+                if (not window_start or str(row[0])[:10] >= window_start)
+                and (not window_end or str(row[0])[:10] <= window_end)
+            ]
+        if not ordered:
+            raise DataSourceError(
+                "腾讯未返回 %s 在 %s ~ %s 区间内的 K 线数据（区间内无交易日或数据不可用）"
+                % (code, window_start or "最早", window_end or "最新")
+            )
         if scale_to_latest and hit_key == hfq_key:
             # 只有真的拿到 hfq 序列才缩放：命中 day（指数）或旧 qfq 键时 k=1 原样返回，
             # 否则会把减法复权的负价一起带出来。

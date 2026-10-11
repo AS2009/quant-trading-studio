@@ -39,7 +39,7 @@ from ..core.errors import (
 )
 from ..core.models import Bar, IndexQuote, MarketBreadth, Quote, SectorQuote
 from . import symbols as sym
-from .base import BaseHTTPProvider
+from .base import BaseHTTPProvider, clean_day, trim_bars
 
 __all__ = ["EastmoneyProvider"]
 
@@ -87,8 +87,14 @@ class EastmoneyProvider(BaseHTTPProvider):
         days: int = 250,
         freq: str = "day",
         adjust: str = "qfq",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
     ) -> List[Bar]:
-        """历史 K 线（按日期升序，最多 ``days`` 根）。"""
+        """历史 K 线（按日期升序，最多 ``days`` 根）。
+
+        ``start`` / ``end`` 映射到东财的 ``beg`` / ``end``（服务端按交易日过滤，闭区间），
+        并在客户端再裁剪一次兜底——即使服务端忽略区间参数，返回的也一定是请求窗口。
+        """
         try:
             code = sym.normalize(symbol)
         except SymbolNotFound as exc:
@@ -111,13 +117,19 @@ class EastmoneyProvider(BaseHTTPProvider):
         if limit <= 0:
             raise ValidationError("days 需为正整数，当前为 %d" % limit, field="days")
 
+        window_start = clean_day(start)
+        window_end = clean_day(end)
+        # 东财的边界都是 YYYYMMDD，且 beg/end 是闭区间；end 留空时沿用原来的远期哨兵值。
+        beg = window_start.replace("-", "") or "0"
+        end_param = window_end.replace("-", "") or "20500101"
         payload = self._get_json(self.KLINE_URL, params={
             "secid": self._code_to_secid(code),
             "fields1": self.KLINE_FIELDS1,
             "fields2": self.KLINE_FIELDS2,
             "klt": self.FREQ_KLT[freq_key],
             "fqt": self.ADJUST_FQT[adjust_key],
-            "end": "20500101",
+            "beg": beg,
+            "end": end_param,
             "lmt": limit,
         })
         data = self._data_of(payload)
@@ -131,7 +143,7 @@ class EastmoneyProvider(BaseHTTPProvider):
         if not bars:
             raise DataSourceError("东方财富 K 线解析失败：%s" % code)
         bars.sort(key=lambda item: item.date)
-        return bars[-limit:]
+        return trim_bars(bars, window_start, window_end, limit)
 
     @staticmethod
     def _parse_kline_row(row: Any) -> Optional[Bar]:

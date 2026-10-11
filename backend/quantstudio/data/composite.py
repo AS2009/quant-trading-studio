@@ -198,6 +198,22 @@ class CompositeProvider:
             value = func(*args, **kwargs)
         except ValidationError:
             raise
+        except TypeError as exc:
+            # 兼容按旧协议（不带 start/end）实现的自定义 provider：带窗口参数调用失败时，
+            # 退回不带额外关键字参数的旧调用方式，而不是把整个源判为不可用。
+            if not kwargs:
+                self._set_state(label, False, "%s: %s" % (type(exc).__name__, _brief(exc)))
+                notes.append("%s.%s 异常：%s: %s" % (label, method, type(exc).__name__, _brief(exc)))
+                return False, None
+            try:
+                value = func(*args)
+            except ValidationError:
+                raise
+            except Exception as inner:      # noqa: BLE001 - 同样兜住，绝不让接口 500
+                self._set_state(label, False, "%s: %s" % (type(inner).__name__, _brief(inner)))
+                notes.append("%s.%s 异常：%s: %s"
+                             % (label, method, type(inner).__name__, _brief(inner)))
+                return False, None
         except DataSourceError as exc:
             self._set_state(label, False, "%s: %s" % (type(exc).__name__, _brief(exc)))
             notes.append("%s.%s 失败：%s: %s" % (label, method, type(exc).__name__, _brief(exc)))
@@ -223,10 +239,15 @@ class CompositeProvider:
         return self._through_labels(self._chain(kind), method, args, notes)
 
     def _through_labels(self, labels: Sequence[str], method: str, args: Tuple[Any, ...],
-                        notes: List[str]) -> Optional[Tuple[str, Any]]:
-        """按给定顺序尝试真实源；全失败返回 ``None``（失败细节写入 notes）。"""
+                        notes: List[str],
+                        kwargs: Optional[Dict[str, Any]] = None) -> Optional[Tuple[str, Any]]:
+        """按给定顺序尝试真实源；全失败返回 ``None``（失败细节写入 notes）。
+
+        ``kwargs`` 会原样透传给各源的该方法（K 线用它传 ``start`` / ``end``）。
+        """
+        extra = kwargs or {}
         for label in labels:
-            ok, value = self._call(label, method, args, {}, notes)
+            ok, value = self._call(label, method, args, extra, notes)
             if ok:
                 return label, value
         return None
@@ -449,8 +470,21 @@ class CompositeProvider:
         self._no_data("指数行情", notes, started)
 
     # ================================================================== K 线
-    def kline(self, symbol: str, days: int = 250, freq: str = "day", adjust: str = "qfq") -> List[Bar]:
-        """历史 K 线（eastmoney → 缓存 → CSV → 示例）。"""
+    def kline(
+        self,
+        symbol: str,
+        days: int = 250,
+        freq: str = "day",
+        adjust: str = "qfq",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+    ) -> List[Bar]:
+        """历史 K 线（eastmoney → 缓存 → CSV → 示例）。
+
+        ``start`` / ``end`` 直接透传给链路里的各真实源（腾讯走服务端日期区间，其余源在客户端
+        裁剪），因此「回测到过去的某天」拿到的是**截至该日**的窗口；两者也参与缓存键，
+        避免不同区间的结果互相覆盖。
+        """
         started = time.time()
         notes: List[str] = []
         try:
@@ -468,8 +502,10 @@ class CompositeProvider:
             raise ValidationError("K 线周期仅支持 day/week/month，当前为 %r" % (freq,), field="freq")
         if adjust_key not in ("qfq", "hfq", "none"):
             raise ValidationError("复权方式仅支持 qfq/hfq/none，当前为 %r" % (adjust,), field="adjust")
+        start_key = str(start or "").strip()[:10]
+        end_key = str(end or "").strip()[:10]
 
-        key = self._key("kline", [code, limit, freq_key, adjust_key])
+        key = self._key("kline", [code, limit, freq_key, adjust_key, start_key, end_key])
         # K 线「粘性源」：同一标的+周期+复权方式，尽量一直用同一个源。
         # 原因：不同免费源的「前复权」口径不同（各自的分红因子更新时点不一样，实测同花顺与腾讯
         # 在 600519 上差约 1%），如果短窗口走腾讯、长窗口因限流降级到同花顺，同一个日期就会
@@ -484,7 +520,9 @@ class CompositeProvider:
             else:
                 self._kline_sticky.pop(sticky_key, None)
                 previous = None
-        hit = self._through_labels(labels, "kline", (code, limit, freq_key, adjust_key), notes)
+        call_args = (code, limit, freq_key, adjust_key)
+        call_kwargs = {"start": start_key or None, "end": end_key or None}
+        hit = self._through_labels(labels, "kline", call_args, notes, call_kwargs)
         if hit is not None:
             label, bars = hit
             for extra in getattr(self.providers.get(label), "last_notes", None) or []:
@@ -501,7 +539,7 @@ class CompositeProvider:
             self._finish("cache", started, notes, stale=stale)
             return cached
         for label in self._local_sources():
-            ok, bars = self._call(label, "kline", (code, limit, freq_key, adjust_key), {}, notes)
+            ok, bars = self._call(label, "kline", call_args, call_kwargs, notes)
             if ok:
                 self._finish(label, started, notes)
                 return bars

@@ -48,8 +48,19 @@ class DataProvider(Protocol):
         days: int = 250,
         freq: str = "day",
         adjust: str = "qfq",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
     ) -> List[Bar]:
-        """历史 K 线，按日期升序。freq: day/week/month；adjust: qfq/hfq/none。"""
+        """历史 K 线，按日期升序。freq: day/week/month；adjust: qfq/hfq/none。
+
+        ``days`` 始终是**返回根数上限**；``start`` / ``end``（``YYYY-MM-DD``）进一步把窗口
+        限定在 ``[start, end]`` 内，两者都可为 ``None``。
+
+        ``end`` 的语义很关键：只给 ``days`` 时，所有实现都返回**截至今天**的最近 ``days`` 根；
+        一旦指定 ``end``，实现必须返回**截至 ``end``**（而不是今天）的窗口。历史回测依赖这一点 ——
+        否则「回测到过去的某个日期」会取到今天的数据，再按日期过滤后窗口整个落空。
+        能按日期区间取数的源（腾讯）在服务端完成；其余源在客户端裁剪。
+        """
         ...
 
     def index_quotes(self, symbols: Sequence[str]) -> List[IndexQuote]:

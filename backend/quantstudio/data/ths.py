@@ -86,7 +86,7 @@ from ..core.errors import (
 )
 from ..core.models import Bar, Quote
 from . import symbols as sym
-from .base import BaseHTTPProvider
+from .base import BaseHTTPProvider, clean_day, trim_bars
 
 __all__ = ["ThsProvider", "to_ths_code"]
 
@@ -363,8 +363,19 @@ class ThsProvider(BaseHTTPProvider):
         return day or clock
 
     # ================================================================== K 线
-    def kline(self, symbol: str, days: int = 250, freq: str = "day", adjust: str = "qfq") -> List[Bar]:
-        """前复权日线（最近 ``days`` 根，升序）；其它周期 / 复权方式返回 ``[]`` 让降级链接手。"""
+    def kline(
+        self,
+        symbol: str,
+        days: int = 250,
+        freq: str = "day",
+        adjust: str = "qfq",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+    ) -> List[Bar]:
+        """前复权日线（最近 ``days`` 根，升序）；其它周期 / 复权方式返回 ``[]`` 让降级链接手。
+
+        ``start`` / ``end`` 在客户端按日期裁剪（同花顺按年翻页，没有服务端区间可传）。
+        """
         freq_key = str(freq or "day").strip().lower()
         adjust_key = str(adjust or "qfq").strip().lower()
         if freq_key != self.KLINE_FREQ or adjust_key != self.KLINE_ADJUST:
@@ -385,7 +396,7 @@ class ThsProvider(BaseHTTPProvider):
         if not rows:
             return []
         bars = self._build_bars(rows)
-        return bars[-limit:]
+        return trim_bars(bars, clean_day(start), clean_day(end), limit)
 
     def _daily_rows(self, code: str, limit: int) -> Tuple[List[List[str]], List[str]]:
         """收集最近 ``limit`` 根日线（升序）：``last.js`` + 逐年 ``<year>.js`` 往前翻页。

@@ -240,8 +240,19 @@ class SinaProvider(BaseHTTPProvider):
         return day or clock
 
     # ================================================================== 不支持的能力
-    def kline(self, symbol: str, days: int = 250, freq: str = "day", adjust: str = "qfq") -> List[Any]:
-        """新浪不提供 K 线接口 → 抛 ProviderUnavailable（让 Composite 兜到东方财富）。"""
+    def kline(
+        self,
+        symbol: str,
+        days: int = 250,
+        freq: str = "day",
+        adjust: str = "qfq",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+    ) -> List[Any]:
+        """新浪不提供 K 线接口 → 抛 ProviderUnavailable（让 Composite 兜到东方财富）。
+
+        ``start`` / ``end`` 仅为与 :class:`DataProvider` 协议保持一致而接受，本实现不使用。
+        """
         raise ProviderUnavailable(
             "新浪不提供 K 线接口（symbol=%s），请使用东方财富数据源" % symbol
         )

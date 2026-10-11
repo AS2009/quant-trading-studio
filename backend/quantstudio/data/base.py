@@ -17,6 +17,7 @@
 :class:`ProviderUnavailable`，**不会发起连接**。
 """
 
+import datetime
 import gzip
 import http.client
 import json
@@ -34,7 +35,7 @@ from ..core.errors import DataSourceError, ProviderUnavailable, SymbolNotFound
 from . import symbols
 from .cache import DiskCache
 
-__all__ = ["BaseHTTPProvider"]
+__all__ = ["BaseHTTPProvider", "clean_day", "trim_bars"]
 
 _DEFAULT_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -53,6 +54,52 @@ _RETRYABLE = (
     TimeoutError,
     OSError,
 )
+
+
+def clean_day(value: Optional[str]) -> str:
+    """把可选的日期端点规整成 ``YYYY-MM-DD``；空值 / 非法值返回空字符串。
+
+    K 线的 ``start`` / ``end`` 用得上：支持 ``YYYY-MM-DD`` 与 ``YYYYMMDD`` 两种写法。
+    非法值**不抛异常**，而是当作「未指定」——宁可退回「最近 N 根」的旧行为，
+    也不要因为一个脏参数让整个取数失败。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    head = text[:10]
+    try:
+        return datetime.date(*[int(part) for part in head.split("-")]).isoformat()
+    except (TypeError, ValueError):
+        pass
+    digits = "".join(char for char in text if char.isdigit())
+    if len(digits) >= 8:
+        try:
+            return datetime.date(int(digits[:4]), int(digits[4:6]), int(digits[6:8])).isoformat()
+        except ValueError:
+            return ""
+    return ""
+
+
+def trim_bars(bars: Sequence[Any], start: str = "", end: str = "",
+              days: int = 0) -> List[Any]:
+    """按 ``[start, end]`` 裁剪 bar 列表（升序），最后最多保留 ``days`` 根（0 = 不限）。
+
+    只按 ``bar.date`` 的前 10 位比较，源返回的时间戳带时分秒也不受影响。
+    起点晚于终点时**自动交换**（与腾讯 / Composite 的处理一致，调用方不必先校验）；
+    仅支持「最近 N 根」的源（CSV / 示例数据）靠它实现区间语义。
+    """
+    out = list(bars or [])
+    if start and end and start > end:
+        start, end = end, start
+    if start or end:
+        out = [
+            bar for bar in out
+            if (not start or str(getattr(bar, "date", ""))[:10] >= start)
+            and (not end or str(getattr(bar, "date", ""))[:10] <= end)
+        ]
+    if days and days > 0:
+        out = out[-int(days):]
+    return out
 
 
 class BaseHTTPProvider:
