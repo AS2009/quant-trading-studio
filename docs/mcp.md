@@ -123,7 +123,7 @@ exe 的下载与打包见 [desktop-gui.md](desktop-gui.md)。
 |---|---|---|
 | `market_overview` | 大盘指数、涨跌广度、两市成交额与主力/北向资金 | 只读 |
 | `market_quotes` | 个股实时快照（不传 `codes` 时查自选池） | 只读 |
-| `market_kline` | 历史 K 线（日/周/月，前/后复权；默认 60 根、上限 400 根） | 只读 |
+| `market_kline` | 历史 K 线（日/周/月，前/后复权；默认 60 根、上限 400 根）。可传 `start` / `end`（`YYYY-MM-DD`，闭区间）精确取某段历史，而不是「最近 N 根」 | 只读 |
 | `market_sectors` | 板块涨幅榜与主力净流入 | 只读 |
 
 ### 自选池（3）
@@ -151,7 +151,7 @@ exe 的下载与打包见 [desktop-gui.md](desktop-gui.md)。
 
 | 工具 | 作用 | 写操作 |
 |---|---|---|
-| `backtest_run` | 用真实历史日线回测策略；默认只回摘要，`include_series=true` 带净值/回撤/月度序列，`include_trades=true` 带成交流水。费用可传 `commission_rate` / `commission_min` / `flow_fee`（每笔固定费）/ `slippage_bps` / `slippage_ticks` + `tick_size`（跳数滑点）/ `lot_size` | 只读但重 |
+| `backtest_run` | 用真实历史日线回测策略；默认只回摘要，`include_series=true` 带净值/回撤/月度序列，`include_trades=true` 带成交流水。费用可传 `commission_rate` / `commission_min` / `flow_fee`（每笔固定费）/ `slippage_bps` / `slippage_ticks` + `tick_size`（跳数滑点）/ `lot_size`；成交价模型 `fill_mode`（`close` 默认 / `open` 当日开盘价，注意不是次日开盘）、无风险利率 `risk_free_rate`（年化小数，如 `0.02` = 2%，进夏普/索提诺分子） | 只读但重 |
 | `backtest_cache_info` | 查看进程内回测缓存 | 只读 |
 | `backtest_cache_clear` | 清空进程内回测缓存 | **写**（仅缓存） |
 

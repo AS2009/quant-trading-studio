@@ -213,7 +213,7 @@ time,price,volume,amount,side
 | `backend/quantstudio/data/composite.py` | 降级链：腾讯 → 新浪 → …；逐笔只有腾讯有方向 |
 | `backend/quantstudio/data/level2_import.py` | 本地导入通道（§4.2 的两种 CSV） |
 | `backend/quantstudio/services/level2_service.py` | 服务层（缓存 + JSON 契约） |
-| `backend/quantstudio/mcp/tools_level2.py` | MCP 三个工具 |
+| `backend/quantstudio/mcp/tools_level2.py` | MCP 8 个工具（§3.3 三个 + §3.4 五个） |
 | `desktop/quantstudio_desktop/views/level2.py`、`frontend/js/views/level2.js` | 两处界面（盘口 + 5 个 L2 工具） |
 
 测试：`backend/tests/test_level2.py` / `test_level2_tools.py`（口径手算对照）、`test_data_providers.py`（解析与降级）、

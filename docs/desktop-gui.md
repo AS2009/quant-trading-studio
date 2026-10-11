@@ -215,7 +215,7 @@ python -m quantstudio_desktop --view market    :: 指定启动页（market/strat
 | 工作流 | 触发 | 做什么 |
 |---|---|---|
 | `.github/workflows/test.yml` | push / PR | Linux 上跑核心测试（3.9/3.11/3.12）+ 策略规范校验 + `compileall`；另有 xvfb 下的桌面测试与 GUI 自检（不阻塞） |
-| `.github/workflows/build-desktop.yml` | push 到 main/master、打 `v*` 标签、PR、手动触发 | 先跑核心测试与**桌面测试（161 项）** → 在 **windows-latest** 用 PyInstaller 打包 onedir + onefile → **对产物跑真实自检** → 用 **Inno Setup** 出安装包并**自检安装包**（静默安装 → 装好后的 `--selftest` → 静默卸载 → 断言用户数据保留）→ 上传制品（zip / 单文件 exe / Setup.exe）→ 打标签时发布 Release（三种产物都附上） |
+| `.github/workflows/build-desktop.yml` | push 到 main/master、打 `v*` 标签、PR、手动触发 | 先跑核心测试与**桌面测试（173 项）** → 在 **windows-latest** 用 PyInstaller 打包 onedir + onefile → **对产物跑真实自检** → 用 **Inno Setup** 出安装包并**自检安装包**（静默安装 → 装好后的 `--selftest` → 静默卸载 → 断言用户数据保留）→ 上传制品（zip / 单文件 exe / Setup.exe）→ 打标签时发布 Release（三种产物都附上） |
 | `.github/workflows/build-macos.yml` | 手动触发、打 `v*` 标签 | 在 **macos-14** 上用 **Homebrew `python-tk@3.12`（自带 Tcl/Tk 9）** 跑 `desktop/build/build_macos.sh`：构建 `.app`（Tcl/Tk 打进包）→ ad-hoc 签名 → 校验 `Info.plist`/架构/**包内是否含 Tcl/Tk**/dmg 可挂载 → 上传制品；打标签时用 `gh release upload` 把 zip/dmg **附加**到 Release（不覆盖正文） |
 
 关于 macOS 工作流的一个坑：**系统自带的 Tk 8.5.9 不能用** —— 它在本机 macOS 10.14+ 上会把窗口画成全白

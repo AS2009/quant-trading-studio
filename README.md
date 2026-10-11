@@ -37,6 +37,7 @@ git clone <this-repo> && cd quant-trading-studio
 python scripts/check_env.py                        # 环境与数据源自检
 python scripts/run_backtest.py --list              # 查看可用策略
 python scripts/run_backtest.py --strategy st_ma_cross --symbols 600519.SH --start 2023-01-01
+python scripts/run_backtest.py --strategy st_ma_cross --symbols 600519.SH --start 2024-01-01 --fill-mode open --risk-free-rate 0.03
 python scripts/fetch_data.py --export-csv          # 导出离线 CSV（断网也能研究）
 ```
 
@@ -128,7 +129,7 @@ quant-trading-studio/
 | 把自研策略并入库 | `quantstudio/strategies/` + `registry.py` | 作为内置策略发布：文件放包根目录，在 `registry.py` 里 import 并 `register_builtin(cls)`，并加入 `BUILTIN_ORDER` |
 | 改交易规则/费用 | `quantstudio/backtest/broker.py`、`core/models.FeeConfig` | 撮合与费用集中在这两处 |
 | 加绩效指标 | `quantstudio/backtest/metrics.py` | 新增纯函数并在 `compute_metrics` 里填充 |
-| 接真实券商（QMT/富途/easytrader） | `quantstudio/trading/adapters.py` | 实现 `Broker` 协议的 `_do_submit`，并显式开启 `QUANTSTUDIO_ENABLE_LIVE_TRADING=1` |
+| 接真实券商（QMT/富途/easytrader） | `quantstudio/trading/adapters.py` | 实现 `Broker` 协议的 `_do_submit`，并显式开启 `QUANTSTUDIO_ENABLE_LIVE_TRADING=1`（真门禁：未开启时 `LiveBrokerStub()` 构造即抛 `BrokerUnavailable`；开启后占位实现的所有交易方法仍抛 `BrokerUnavailable`，永不真下单） |
 | 加数据源之外的本地数据 | `data/csv/` | 按 `backend/data/README.md` 的 CSV 规范导入，或用 `scripts/fetch_data.py --export-csv` 导出 |
 
 ### 前端模块（`frontend/js/`，纯原生、按职责拆分）
@@ -199,20 +200,26 @@ quant-trading-studio/
 - **数据**：乘法前复权日线（`adjust=qfq` = 后复权缩放到最新真实价）——腾讯自带的「前复权」是减法复权，
   深历史会出现负价与失真的涨跌幅（实测 600519 取 5000 根时首根 -304.77 元），所以本项目统一按后复权口径取数、
   再缩放到最新价（末根 = 今日真实价，收益率与后复权一致）；按标的共同交易日对齐，停牌当日不做交易；
-- **撮合**：默认市价单以**当日收盘价**成交（可按需改为开盘价模型），成交价计入滑点 —— `slippage_bps`
-  （比例，默认 2bp，买入上浮/卖出下浮）与 `slippage_ticks × tick_size`（最小变动价位的跳数）**叠加**，
-  并按 tick 取整到**对买方不利**的方向；
+- **撮合**：默认市价单以**当日收盘价**成交；要改成开盘价模型就传 `fill_mode=open`
+  （`/api/backtest/<id>?fill_mode=open`、CLI `--fill-mode open`；Web 回测页也有「成交价模型」下拉，
+  桌面版回测页暂未暴露该开关；非法值返回 400）——
+  注意它是「**当日**开盘价」，**不是次日开盘价**（真正的次日开盘撮合需要挂单队列，本项目未实现，见 `backtest/broker.py` 顶部说明）；
+  成交价计入滑点 —— `slippage_bps`（比例，默认 2bp，买入上浮/卖出下浮）与
+  `slippage_ticks × tick_size`（最小变动价位的跳数）**叠加**，并按 tick 取整到**对买方不利**的方向；
 - **费用**（`FeeConfig`，可覆盖）：佣金万 2.5（单笔最低 5 元）、印花税卖出 0.05%、过户费双边 0.001%、
   流量费 `flow_fee`（**每笔固定**，默认 0 元，买卖各收一次，兼容旧口径）；
 - **买入量反解**：`core/costs.max_buy_qty` 按可用资金**含滑点与全部费用**精确反解整手数，
   策略 `self.max_buy_qty()` 与撮合的资金缩量共用同一实现（费率再高也不会「策略算得出、撮合买不进」）；
 - **模拟盘同口径**：`trading/paper.py` 的成交价与费用同样走 `core/costs`（流量费、tick 滑点都生效），
+  **涨跌停约束也按同一 9.8% 阈值实现**（`PaperBroker.limit_pct`）：涨停拒买、跌停拒卖，被拒委托带可读理由；
   回测与模拟盘不会出现两套算法（`trading.broker_base.compute_fee` 已改为复用它）；
 - **交易约束**：买入数量向下取整到 100 股整数倍；卖出受 **T+1**（当日买入次日可卖）与可卖数量限制；
-  **涨跌停不成交**（|当日涨跌幅| ≥ 9.8% 视为封板，封板方向无法成交）；资金不足时自动缩量，缩到 0 则放弃；
+  **涨跌停不成交**（|当日涨跌幅| ≥ 9.8% 视为封板，封板方向无法成交；回测与模拟盘同一阈值，
+  创业板/科创板 20% 涨跌幅**未区分**）；资金不足时自动缩量，缩到 0 则放弃；
 - **无未来函数**：策略只能通过 `ctx.history()` 读取**截至当日**的数据（引擎层保证，测试中有专项校验）；
 - **绩效口径**：年化收益 = (1+累计收益)^(252/交易日数) − 1（几何）；年化波动 = 日收益标准差×√252；
-  夏普 = (年化收益 − 无风险利率)/年化波动（默认无风险利率 0）；索提诺用下行波动；卡玛 = 年化收益/最大回撤；
+  夏普 = (年化收益 − 无风险利率)/年化波动（无风险利率默认 0，可用 `risk_free_rate` 传年化小数 0~1，
+  如 `--risk-free-rate 0.03` = 3%，进夏普/索提诺分子与 Alpha）；索提诺用下行波动；卡玛 = 年化收益/最大回撤；
   最大回撤 = max(1 − 权益/历史峰值) 并给出起止日期；胜率与盈亏比按**平仓交易**统计；Alpha/Beta 用日收益对基准回归；
   另有最长连涨/连跌交易日数、单笔平仓收益极值（FIFO 配对）、日均交易次数（**共 25 项**，字段见 `backtest/metrics.py`）；
 - **结果可复现**：相同输入 → 完全相同输出（无随机数、无集合遍历顺序依赖）。
@@ -307,11 +314,11 @@ python scripts/run_backtest.py --strategy st_my_alpha --symbols 600519.SH --star
 | GET | `/api/level2/<code>/seal` | 封板状态（涨停/跌停、封单额、封成比） |
 | GET | `/api/level2/scan?codes=&limit=` | 盘口异动扫描（缺省=自选池，最多 10 只，按委比降序） |
 | GET | `/api/level2/flow-rank?codes=&top=` | 资金流排行（缺省=自选池，按主力净额降序） |
-| GET | `/api/market/kline?code=&days=&freq=day&adjust=qfq` | K 线 |
+| GET | `/api/market/kline?code=&days=&freq=day&adjust=qfq` | K 线；可选 `start`/`end`（`YYYY-MM-DD`）传了就返回该日期区间（而不是最近 `days` 根），格式非法返回 400 |
 | GET/POST/DELETE | `/api/watchlist` `/api/watchlist/<code>` | 自选池读写 |
 | GET/POST | `/api/strategies` | 策略列表 / 新建自定义策略 |
 | GET/DELETE | `/api/strategies/<id>` | 策略详情 / 删除 |
-| GET/POST | `/api/backtest/<id>` | 回测（区间、资金、基准、标的、费率与滑点均可传参；费率含 `flow_fee` 流量费、`slippage_ticks` 跳数滑点、`lot_size`） |
+| GET/POST | `/api/backtest/<id>` | 回测（区间、资金、基准、标的、费率与滑点均可传参；费率含 `flow_fee` 流量费、`slippage_ticks` 跳数滑点、`lot_size`；成交价模型 `fill_mode=close\|open`（默认 close），无风险利率 `risk_free_rate` 年化小数 0~1（默认 0，进夏普/索提诺分子与 Alpha）；非法值返回 400） |
 | GET | `/api/portfolio/overview` `/holdings` `/equity` | 账户总览 / 持仓 / 权益曲线 |
 | POST/DELETE | `/api/portfolio/holdings` | 录入 / 删除真实持仓 |
 | POST | `/api/portfolio/cash` `/api/portfolio/mode` | 设置现金 / 切换 manual·paper 模式 |
@@ -328,7 +335,9 @@ cd backend && python -m unittest discover -s tests -v      # 全量：核心层/
 python scripts/check_env.py                                # 环境与数据源一键自检
 ```
 
-- 共 **190+ 个用例**，只依赖标准库（`unittest`），零测试框架依赖；
+- 共 **573 个用例**（`grep -rn "def test_" backend/tests/*.py | wc -l` = 573；实测 `cd backend && python -m unittest discover -s tests`：
+  真实源可用时 `Ran 573 tests ... OK (skipped=2)`，真实源被限流/断网时网络用例自动跳过为 `Ran 569 tests ... OK (skipped=4)`），
+  只依赖标准库（`unittest`），零测试框架依赖；
 - 关键覆盖：撮合规则（费用/T+1/涨跌停/缩量）、指标手算对照、**无未来函数专项校验**（把未来行情放大 10 倍不影响当日决策）、
   结果可复现（两次运行逐字节一致）、数据源降级链（主源故障→缓存→CSV→示例）、接口错误码与 JSON 契约、离线模式零网络请求；
 - 涉及真实网络的用例在断网时**自动跳过**，不影响离线开发。
