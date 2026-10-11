@@ -45,3 +45,7 @@ Thumbs.db
 *.log
 .idea/
 .vscode/
+
+# 掘金/外部平台策略转换产物（scripts/import_strategy.py 的默认输出目录）
+# 它们是「待人工改 TODO」的中间产物，不是可直接加载的策略，因此不入库。
+backend/quantstudio/strategies/local/_imported/

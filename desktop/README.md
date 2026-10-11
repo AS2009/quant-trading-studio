@@ -120,7 +120,7 @@ CI：`.github/workflows/build-desktop.yml` 在 windows-latest 上跑核心测试
 ## 6. 测试
 
 ```bash
-python -m unittest discover -s backend/tests -v     # 核心（与 Web 版共用，需要 flask）；实测 573 项（真实源受限时 569）
+python -m unittest discover -s backend/tests -v     # 核心（与 Web 版共用，需要 flask）；实测 604 项
 python -m unittest discover -s desktop/tests -v     # 桌面（需要 tkinter）；实测 173 项
 python scripts/check_strategies.py                  # 策略规范校验（内置 + local/）
 python -m compileall -q backend desktop scripts     # 语法编译检查

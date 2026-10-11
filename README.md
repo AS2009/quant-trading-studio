@@ -259,9 +259,46 @@ python scripts/run_backtest.py --strategy st_my_alpha --symbols 600519.SH --star
 | [`docs/ai-strategy-guide.md`](docs/ai-strategy-guide.md) | 用 AI 写策略的提示词模板、修复动作表、交付格式 |
 | [`docs/level2.md`](docs/level2.md) | 盘口 / L2：能力边界、口径（盘口单位、逐笔方向、资金流分档）、HTTP 与 MCP 用法、接入付费 L2 的两条路 |
 
-`local/` 下已附带三个通过校验的示例：`st_breakout_atr`（通道突破 + ATR 止损）、`st_rotation_topn`（动量轮动 TopN）、
-`st_macd_adx`（MACD 金叉 + ADX 趋势过滤 + 布林中轨离场，演示 `macd/kdj/boll/adx/cross` 等新指标怎么用）。
+`local/` 下已附带四个通过校验的示例：`st_breakout_atr`（通道突破 + ATR 止损）、`st_rotation_topn`（动量轮动 TopN）、
+`st_macd_adx`（MACD 金叉 + ADX 趋势过滤 + 布林中轨离场，演示 `macd/kdj/boll/adx/cross` 等新指标怎么用）、
+`st_gm_boll_reversion`（布林线均值回归，由**掘金策略转换**而来，见下一节）。
 加载失败的文件只会在 `/api/system/status` 的 `local.errors` 中记录，不会影响应用启动。
+
+### 从掘金（gm.api）导入策略
+
+外部平台（掘金 `gm.api`、聚宽、米筐…）的策略用的是**平台自己的运行时**：全局函数 + `context`
+对象 + pandas。本项目是 `BaseStrategy` 子类 + `ctx` 上下文 + 零依赖，两者不是「改个 import」的关系 ——
+缺的是**数据能力**（掘金能取指数成分股、全市场市值、财务报表、分钟线、股指期货，本项目的数据层没有）。
+
+所以转换工具会**先判定、再转换**，并把代价写清楚：
+
+```bash
+python scripts/import_strategy.py --list                        # 看 gm.api → 本项目的能力对照表
+python scripts/import_strategy.py 策略.py                        # 转换单个文件
+python scripts/import_strategy.py --dir ~/Downloads --all        # 批量转换 + 出总报告
+python scripts/import_strategy.py 策略.py --dry-run              # 只看诊断，不写文件
+```
+
+判定分三级，产物目录 `strategies/local/_imported/`（下划线开头 → **不会**被自动加载）：
+
+| 判定 | 含义 | 产物形态 |
+|---|---|---|
+| ✅ `fidelity` | 用到的 API 全有等价物且语义已核对 | 可用的策略骨架 |
+| ⚠️ `approximate` | 可翻译但**语义有损**（分钟线→日线、目标仓位→按当时现金下单…） | 骨架 + `TODO(转换)` + 逐项损失说明 |
+| ⛔ `blocked` | 依赖本项目缺失的数据能力 | 骨架，取数处**显式 `NotImplementedError`** |
+
+> `blocked` 的产物**故意会抛错**：如果只是 `return []`，你把它挪进 `local/` 后回测会「成功」
+> 并给出 0 笔交易 —— 那比报错更危险（你会以为策略没信号，而不是没数据）。
+
+诊断报告写在 `_imported/CONVERSION-REPORT.md`，逐项列出「缺什么能力、哪一行、会损失什么」。
+改完 `TODO`、`python scripts/check_strategies.py --path <文件>` 0 error 之后，再把它移到
+`strategies/local/`（打包版移到安装目录 `strategies\`）即可出现在策略列表。
+
+**实测**：拿 9 个掘金官方示例策略（风格轮动 / 多因子选股 / 小市值 / 机器学习 / 布林线均值回归 /
+日内回转 / 指数增强 / alpha对冲 等）跑转换，结果是 **2 个可转换（语义有损）、7 个受限于数据能力**。
+转换后的 `st_gm_boll_reversion` 已通过校验并可直接回测 —— 注意它的布林线用**样本**标准差
+（ddof=1，对齐 pandas `rolling().std()`），与本项目内置 `boll()` 的**总体**标准差不同，
+直接用 `boll()` 会让轨道变窄、改变信号触发点。
 
 > 策略只是**示例实现**，用于演示框架如何工作；它们没有经过参数寻优，不代表可盈利。请自行研究、验证与小资金实测。
 
@@ -335,8 +372,8 @@ cd backend && python -m unittest discover -s tests -v      # 全量：核心层/
 python scripts/check_env.py                                # 环境与数据源一键自检
 ```
 
-- 共 **573 个用例**（`grep -rn "def test_" backend/tests/*.py | wc -l` = 573；实测 `cd backend && python -m unittest discover -s tests`：
-  真实源可用时 `Ran 573 tests ... OK (skipped=2)`，真实源被限流/断网时网络用例自动跳过为 `Ran 569 tests ... OK (skipped=4)`），
+- 共 **604 个用例**（`grep -rn "def test_" backend/tests/*.py | wc -l` = 604；实测 `cd backend && python -m unittest discover -s tests`：
+  真实源可用时 `Ran 604 tests ... OK (skipped=2)`，真实源被限流/断网时网络用例自动跳过，运行数会相应减少），
   只依赖标准库（`unittest`），零测试框架依赖；
 - 关键覆盖：撮合规则（费用/T+1/涨跌停/缩量）、指标手算对照、**无未来函数专项校验**（把未来行情放大 10 倍不影响当日决策）、
   结果可复现（两次运行逐字节一致）、数据源降级链（主源故障→缓存→CSV→示例）、接口错误码与 JSON 契约、离线模式零网络请求；

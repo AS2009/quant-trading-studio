@@ -678,12 +678,19 @@ def lint_all(smoke: bool = True) -> Dict[str, Any]:
     package_dir = os.path.dirname(os.path.abspath(__file__))
     targets: List[Tuple[str, str]] = []
     for filename in sorted(os.listdir(package_dir)):
+        # 排除「不是策略」的包内模块：基类 / 注册表 / 校验器 / 用户策略存储 / 外部平台转换器
         if filename.endswith(".py") and filename not in (
-                "__init__.py", "base.py", "registry.py", "lint.py", "user.py"):
+                "__init__.py", "base.py", "registry.py", "lint.py", "user.py", "gm_compat.py"):
             targets.append((os.path.join(package_dir, filename), "builtin"))
     local_dir = registry_module.LOCAL_DIR
     for filename in sorted(os.listdir(local_dir)) if os.path.isdir(local_dir) else []:
-        if filename.endswith(".py") and not filename.startswith("_") and filename != "__init__.py":
+        # 下划线开头 = 按约定「不是可加载的策略」（与 discover_local 一致）：
+        # 既跳过 `_template.py` 这类文件，也跳过 `_imported/` 这类**目录**——
+        # 后者是 scripts/import_strategy.py 的转换产物，里面是待人工改 TODO 的骨架，
+        # 拿「已发布策略」的标准去 lint 它们只会制造噪音。
+        if filename.startswith("_"):
+            continue
+        if filename.endswith(".py") and filename != "__init__.py":
             targets.append((os.path.join(local_dir, filename), "local"))
 
     reports = [lint_path(path, origin=origin, smoke=smoke, registry=registry_module) for path, origin in targets]
