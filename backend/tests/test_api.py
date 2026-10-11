@@ -895,13 +895,15 @@ class ApiTestCase(unittest.TestCase):
             "/api/backtest/st_ma_cross?start=2024-01-01&end=2024-06-30&cash=500000"
             "&symbols=600519.SH&adjust=qfq&slippage_bps=3&short_ma=5"
         )
+        # 服务层按请求浅拷贝引擎（fill_mode / risk_free_rate 是请求级配置，不能改共享单例），
+        # 因此调用计数落在本次运行的副本上；真实引擎无状态，结果与直接跑单例一致。
         before = self.engine.calls
         first = self.check_envelope(self.client.get(path))["data"]
-        self.assertEqual(self.engine.calls, before + 1)
+        self.assertEqual(self.engine.calls, before, "共享模板引擎不应被请求直接调用")
         self.assertTrue(first["nav"])
         self.assertIn("metrics", first)
         second = self.check_envelope(self.client.get(path))["data"]
-        self.assertEqual(self.engine.calls, before + 1, "相同参数应命中缓存")
+        self.assertEqual(self.engine.calls, before, "相同参数应命中缓存，不再跑引擎")
         self.assertEqual(first["metrics"]["trade_count"], second["metrics"]["trade_count"])
 
     def test_17_backtest_post(self):

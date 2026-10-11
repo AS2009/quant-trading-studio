@@ -6,6 +6,7 @@
 - 数据不足（``InsufficientData``）转换为可读的 ``ValidationError``（400）
 """
 
+import copy
 import hashlib
 import json
 import threading
@@ -44,9 +45,14 @@ REQUEST_KEYS = frozenset(
         "flow_fee",
         "slippage_ticks",
         "tick_size",
+        "fill_mode",
+        "risk_free_rate",
         "params",
     ]
 )
+
+#: 成交价模型：``close`` 按当日收盘价、``open`` 按当日开盘价（更保守，见 backtest/broker.py）
+FILL_MODES = ("close", "open")
 
 
 def _coerce(value: Any) -> Any:
@@ -124,11 +130,27 @@ class BacktestService:
 
     @property
     def engine(self):
+        """默认引擎（``close`` + ``rf=0``）：供外部直接调用或复用；请求级参数请用 :meth:`_new_engine`。"""
         if self._engine is None:
             from ..backtest.engine import BacktestEngine
 
             self._engine = BacktestEngine(self.provider, calendar=self.calendar)
         return self._engine
+
+    def _new_engine(self, fill_mode: str = "close", risk_free_rate: float = 0.0):
+        """按请求参数返回一个新的引擎实例。
+
+        ``fill_mode`` / ``risk_free_rate`` 是**请求级**配置：直接改共享单例的属性，在多线程
+        （Flask 默认 threaded）下会互相覆盖。所以这里基于已解析的引擎做一次浅拷贝再写入参数：
+
+        - 正常情况：浅拷贝真实 ``BacktestEngine``（无状态，每次 ``run`` 都会重置账户与撮合），
+          构造开销可忽略；
+        - 测试注入替身引擎时：同样走浅拷贝，保证注入的引擎仍然被使用（不会被换成真实引擎）。
+        """
+        engine = copy.copy(self.engine)
+        engine.fill_mode = fill_mode
+        engine.risk_free_rate = risk_free_rate
+        return engine
 
     # ------------------------------------------------------------------ 主流程
 
@@ -143,8 +165,14 @@ class BacktestService:
 
         request = self._build_request(strategy_id, options, strategy_params)
         strategy = self._create_strategy(strategy_id, strategy_params, request.symbols)
+        # 成交价模型与无风险利率是**请求级**参数。引擎按请求新建（而不是改共享实例的属性）：
+        # Flask 是多线程的，改共享引擎的属性会让并发请求互相覆盖对方的口径。
+        engine = self._new_engine(
+            fill_mode=self._parse_fill_mode(options.get("fill_mode")),
+            risk_free_rate=self._parse_risk_free_rate(options.get("risk_free_rate")),
+        )
         try:
-            result = self.engine.run(request, strategy)
+            result = engine.run(request, strategy)
         except InsufficientData as exc:
             raise ValidationError("历史数据不足，无法回测：%s" % exc, field="symbols")
         data = result.to_dict() if hasattr(result, "to_dict") else result
@@ -270,6 +298,26 @@ class BacktestService:
             fee=fee,
             params_override=dict(strategy_params),
         )
+
+    @staticmethod
+    def _parse_fill_mode(raw: Any) -> str:
+        """成交价模型：``close``（默认，当日收盘价）/ ``open``（当日开盘价，更保守）。"""
+        text = str(raw or "").strip().lower() or FILL_MODES[0]
+        if text not in FILL_MODES:
+            raise ValidationError(
+                "fill_mode 仅支持 %s，当前为 %r" % (" / ".join(FILL_MODES), raw),
+                field="fill_mode",
+            )
+        return text
+
+    @staticmethod
+    def _parse_risk_free_rate(raw: Any) -> float:
+        """无风险利率（**年化小数**，0.02 表示 2%），用于夏普 / 索提诺分子。
+
+        留空 = 0（与历史口径一致）；只接受 [0, 1] 区间，避免把「2」当成 200% 静默算错。
+        """
+        value = parse_float(raw, "risk_free_rate", default=0.0, minimum=0.0, maximum=1.0)
+        return float(value or 0.0)
 
     def _spec_id(self, spec: Any) -> str:
         if isinstance(spec, dict):

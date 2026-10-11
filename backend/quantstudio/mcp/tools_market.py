@@ -18,6 +18,7 @@
 所有业务读写都走 ``quantstudio.services``，本模块只做参数映射、异常翻译与结果整形。
 """
 
+import datetime
 import json
 import os
 from typing import Any, Dict, List
@@ -94,6 +95,18 @@ def _safe_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         number = default
     return max(minimum, min(number, maximum))
+
+
+def _optional_day(value: Any, field: str):
+    """可选日期参数（``YYYY-MM-DD``）：留空返回 ``None``，格式非法抛可读的 ToolError。"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.date.fromisoformat(text[:10]).isoformat()
+    except ValueError:
+        raise ToolError("参数 %s 需为 YYYY-MM-DD 格式的日期，当前为 %r" % (field, value),
+                        hint="例如 2024-01-01；也可省略该参数。", code="INVALID_ARGS")
 
 
 def _fmt_yi(value: Any) -> str:
@@ -275,6 +288,11 @@ def register(registry: Any) -> None:
                           default="day", enum=["day", "week", "month"]),
             "adjust": p_str("复权方式：qfq=前复权（默认）、hfq=后复权、none=不复权",
                             default="qfq", enum=["qfq", "hfq", "none"]),
+            "start": p_str("可选：只取该日期起的 K 线（YYYY-MM-DD）；与 end 组成区间，"
+                           "用于精确查某段历史而不是「最近 N 根」",
+                           pattern=r"^\d{4}-\d{2}-\d{2}$", examples=["2024-01-01"]),
+            "end": p_str("可选：只取到该日期为止的 K 线（YYYY-MM-DD，闭区间）",
+                         pattern=r"^\d{4}-\d{2}-\d{2}$", examples=["2024-06-30"]),
         }, required=["symbol"]),
         group="market", read_only=True, idempotent=True, open_world=True,
     )
@@ -295,8 +313,13 @@ def register(registry: Any) -> None:
                             hint="可选值：qfq（前复权）、hfq（后复权）、none（不复权）。",
                             code="INVALID_ARGS")
 
+        # 可选日期区间：与 HTTP /api/market/kline 的 start/end 同语义（闭区间）
+        start = _optional_day(args.get("start"), "start")
+        end = _optional_day(args.get("end"), "end")
+
         try:
-            rows = ctx.call(ctx.market.kline, symbol, days=days, freq=freq, adjust=adjust)
+            rows = ctx.call(ctx.market.kline, symbol, days=days, freq=freq, adjust=adjust,
+                            start=start, end=end)
         except ToolError as exc:
             raise ToolError(exc.message, hint=_MARKET_HINT, code=exc.code)
         rows = list(rows or [])

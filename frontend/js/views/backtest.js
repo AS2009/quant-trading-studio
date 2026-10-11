@@ -273,6 +273,8 @@ const BacktestView = {
       commission_wan: 2.5, /* 展示单位：万分之；提交时换算为 commission_rate */
       flow_fee: 0,
       slippage_ticks: 0,
+      fill_mode: "close",
+      risk_free_pct: 0, /* 展示单位：年化百分数；提交时换算为 risk_free_rate 小数 */
     };
   },
 
@@ -303,6 +305,14 @@ const BacktestView = {
         ${UI.field({ id: "bt-ticks", name: "slippage_ticks", label: "滑点（跳数）", type: "number",
           value: f.slippage_ticks, min: 0, max: 100, step: 1,
           hint: "按最小变动价位（0.01 元）的跳数叠加，取对买方不利方向" })}
+        ${UI.field({ id: "bt-fill-mode", name: "fill_mode", label: "成交价模型", type: "select",
+          options: [{ value: "close", label: "当日收盘价（默认）" },
+                    { value: "open", label: "当日开盘价（更保守）" }],
+          value: f.fill_mode || "close",
+          hint: "注意是「当日」开盘，不是次日开盘；开盘模型下策略仍读到当日收盘，结果会更保守" })}
+        ${UI.field({ id: "bt-risk-free", name: "risk_free_pct", label: "无风险利率（年化 %）", type: "number",
+          value: f.risk_free_pct, min: 0, max: 100, step: 0.1,
+          hint: "用于夏普 / 索提诺分子，默认 0；提交值 risk_free_rate = 年化% / 100" })}
       </div>
       <div class="form-meta">
         策略：<strong>${fmt.esc(s.name || "—")}</strong>
@@ -334,6 +344,8 @@ const BacktestView = {
     f.commission_wan = read("#bt-commission", true);
     f.flow_fee = read("#bt-flow-fee", true);
     f.slippage_ticks = read("#bt-ticks", true);
+    f.fill_mode = read("#bt-fill-mode");
+    f.risk_free_pct = read("#bt-risk-free", true);
     Store.state.backtestForm = f;
     /* 佣金提示实时联动 */
     const hint = c.querySelector("#bt-commission")?.parentElement.querySelector(".field-hint");
@@ -404,6 +416,8 @@ const BacktestView = {
     if (f.commission_wan === null || f.commission_wan < 0) return { field: "#bt-commission", message: "佣金费率不能为负" };
     if (f.flow_fee === null || f.flow_fee < 0) return { field: "#bt-flow-fee", message: "流量费不能为负" };
     if (f.slippage_ticks === null || f.slippage_ticks < 0) return { field: "#bt-ticks", message: "滑点跳数不能为负" };
+    if (f.risk_free_pct === null || f.risk_free_pct < 0) return { field: "#bt-risk-free", message: "无风险利率不能为负" };
+    if (f.risk_free_pct > 100) return { field: "#bt-risk-free", message: "无风险利率不能超过 100%" };
     const max = 20; /* 与后端 symbols 上限保持一致的前端前置校验 */
     if ((f.symbols || []).length > max) {
       return { field: "#bt-symbols", message: "标的池最多 " + max + " 只，请减少选择" };
@@ -440,6 +454,8 @@ const BacktestView = {
         symbols: f.symbols || [], slippage_bps: f.slippage_bps,
         flow_fee: f.flow_fee, slippage_ticks: f.slippage_ticks,
         commission_rate: Number(f.commission_wan || 0) / 10000,
+        fill_mode: f.fill_mode || "close",
+        risk_free_rate: Number(f.risk_free_pct || 0) / 100,
       };
       const json = await API.runBacktest(id, params, { timeout: 120000 });
       this.state.resultKey = id;

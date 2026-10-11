@@ -16,7 +16,10 @@ from quantstudio import config as config_mod  # noqa: E402
 from quantstudio.core.models import BacktestRequest  # noqa: E402
 from quantstudio.data import build_provider, get_provider  # noqa: E402
 
-REAL_SOURCES = {"eastmoney", "tencent", "sina"}
+#: 能提供**真实**行情的源。``ths``（同花顺）也是真实源：东财被限流、腾讯返回 501 时，
+#: 降级链会命中同花顺并给出真实的贵州茅台价格；把它排除在外会让本组用例「明明有真实数据
+#: 却整类跳过」，白白丢掉真实链路的覆盖。
+REAL_SOURCES = {"eastmoney", "tencent", "sina", "ths"}
 STOCK = "600519.SH"   # 贵州茅台：真实价格量级 1000+ 元，演示数据只有个位数到几十元
 BENCH = "000300.SH"   # 沪深300
 

@@ -125,11 +125,16 @@ class MarketService:
         days: Optional[int] = None,
         freq: str = "day",
         adjust: str = "qfq",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        """K 线（``start`` / ``end`` 可选：给定后返回该日期区间内的数据，而不是最近 ``days`` 根）。"""
         code = normalize_code(code)
         if days is None:
             days = self.settings.default_kline_days
-        key = "market:kline:%s:%d:%s:%s" % (code, days, freq, adjust)
+        start_key = str(start or "").strip()[:10]
+        end_key = str(end or "").strip()[:10]
+        key = "market:kline:%s:%d:%s:%s:%s:%s" % (code, days, freq, adjust, start_key, end_key)
         ttl = (
             self.settings.cache_ttl.kline_closed
             if self.calendar.is_closed()
@@ -138,11 +143,27 @@ class MarketService:
         rows = cached(
             key,
             ttl,
-            lambda: [to_dict(x) for x in self.provider.kline(code, days=days, freq=freq, adjust=adjust)],
+            lambda: [to_dict(x) for x in self._fetch_kline(code, days, freq, adjust,
+                                                          start_key, end_key)],
         )
         if not rows:
             raise SymbolNotFound("未找到标的 %s 的 K 线数据" % code)
         return rows
+
+    def _fetch_kline(self, code: str, days: int, freq: str, adjust: str,
+                     start: str, end: str) -> List[Any]:
+        """调用 provider 取 K 线；provider 不认识 ``start`` / ``end`` 时退回旧调用方式。
+
+        与 ``CompositeProvider._call`` 同样的兼容策略：按旧协议（只接受 ``days``）实现的
+        自定义 provider / 测试桩不应因为多传两个可选参数而整个接口 500。
+        """
+        if not (start or end):
+            return self.provider.kline(code, days=days, freq=freq, adjust=adjust) or []
+        try:
+            return self.provider.kline(code, days=days, freq=freq, adjust=adjust,
+                                       start=start or None, end=end or None) or []
+        except TypeError:
+            return self.provider.kline(code, days=days, freq=freq, adjust=adjust) or []
 
     # ------------------------------------------------------------------ 自选池
 

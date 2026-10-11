@@ -2,8 +2,9 @@
 """真实券商适配层（**占位实现**）：接入位置、步骤与风控要求。
 
 本项目默认**只做模拟盘**（``quantstudio.trading.paper.PaperBroker``）。本模块提供的
-``LiveBrokerStub`` 是真实通道的占位：``is_live = True``，但任何提交都抛
-`BrokerUnavailable`，绝不会向券商发出真实委托。真实下单风险自负。
+``LiveBrokerStub`` 是真实通道的占位：``is_live = True``，但**构造本身受环境变量门禁约束**
+（未设置 ``QUANTSTUDIO_ENABLE_LIVE_TRADING`` 时构造即抛 `BrokerUnavailable`），且任何提交
+都抛 `BrokerUnavailable`，绝不会向券商发出真实委托。真实下单风险自负。
 
 一、接入位置（只改本文件与 trading/__init__.py 的导出，不要改既有通道）
 --------------------------------------------------------------------
@@ -21,7 +22,8 @@
 
 3. 必须显式设置环境变量 ``QUANTSTUDIO_ENABLE_LIVE_TRADING=1`` 才允许实例化真实通道
    （见 ``LIVE_TRADING_ENV``），且**必须自行实现 _do_submit**——占位实现永不成交。
-   建议在 ``__init__`` 里直接检查该开关，未开启时抛 ``BrokerUnavailable``。
+   ``LiveBrokerStub`` 已按此实现真门禁：未开启时 ``__init__`` 直接抛 ``BrokerUnavailable``
+   （带可读理由与设置方法）；开启后允许构造，但所有交易方法仍抛 ``BrokerUnavailable``。
 
 4. 常见券商接入点：
    - QMT / miniQMT（迅投 xtquant）：Windows + 客户端登录；用 ``xtquant.xttrader.XtQuantTrader``
@@ -46,15 +48,28 @@
 """
 
 import os
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from ..core.errors import BrokerUnavailable
-from ..core.models import Account, Order, OrderRequest, Position
+from ..core.models import Account, FeeConfig, Order, OrderRequest, Position
 from .broker_base import BaseBroker
 from .paper import PaperBroker
 
 #: 启用真实通道的显式开关（缺省关闭）
 LIVE_TRADING_ENV = "QUANTSTUDIO_ENABLE_LIVE_TRADING"
+
+#: 视为「已打开开关」的取值（大小写/空白不敏感）
+LIVE_TRADING_TRUTHY = ("1", "true", "yes", "on")
+
+
+def live_trading_enabled() -> bool:
+    """真实通道开关是否被显式打开（纯读环境变量，不构造实例）。
+
+    供 ``available_brokers()`` 与 :meth:`LiveBrokerStub.is_enabled` 共用，保证
+    「展示的 enabled」与「构造门禁」用的是同一个判定，不会出现展示说开了、构造却被拒的情况。
+    """
+    return os.environ.get(LIVE_TRADING_ENV, "").strip().lower() in LIVE_TRADING_TRUTHY
+
 
 #: 接入真实券商的最小步骤（供 /api/system/status 展示）
 LIVE_TRADING_STEPS = [
@@ -80,26 +95,54 @@ _UNAVAILABLE_TEMPLATE = (
     "真实下单风险自负。" % LIVE_TRADING_ENV
 )
 
+#: 构造门禁的拒绝理由（含开关名与三种设置方法）
+_GATE_TEMPLATE = (
+    "真实券商通道未启用（LiveBrokerStub 占位）：环境变量 %s 未设置或不为真值"
+    "（可用值：1/true/yes/on，大小写不敏感）。设置方法："
+    "macOS/Linux 执行 `export %s=1`；Windows CMD 执行 `set %s=1`；"
+    "PowerShell 执行 `$env:%s=\"1\"`；也可写在启动脚本里，设置后需重启服务生效。"
+    "注意：打开该开关只解除构造门禁，占位实现仍不会向券商发送任何委托——"
+    "真正接入需自行实现 BaseBroker 子类的 _do_submit。"
+    % (LIVE_TRADING_ENV, LIVE_TRADING_ENV, LIVE_TRADING_ENV, LIVE_TRADING_ENV)
+)
+
 
 class LiveBrokerStub(BaseBroker):
-    """真实券商通道占位：``is_live = True``，但任何提交都抛 ``BrokerUnavailable``。"""
+    """真实券商通道占位：构造受环境变量门禁；``is_live = True``，但任何提交都抛 ``BrokerUnavailable``。
+
+    门禁（真门禁，不只是展示）：
+    - 未显式设置 ``QUANTSTUDIO_ENABLE_LIVE_TRADING`` 时，``__init__`` 直接抛 ``BrokerUnavailable``；
+    - 已设置时允许构造，但 ``submit / cancel / orders / fills / positions / account``
+      仍一律抛 ``BrokerUnavailable``——占位语义不变，**永远不会真实下单**。
+    """
 
     name = "live"
     is_live = True
     kind = "live"
     available = False
     order_prefix = "LIVE"
-    description = "真实券商通道占位（未接入）：任何下单都会抛 BrokerUnavailable，不会真实成交"
+    description = "真实券商通道占位（未接入）：构造需显式开关，任何下单都会抛 BrokerUnavailable，不会真实成交"
     rules = [
         "占位实现：未接入任何券商 SDK，任何提交/撤单/查询都抛 BrokerUnavailable。",
-        "启用条件：自行实现 _do_submit 且显式设置 " + LIVE_TRADING_ENV + "=1。",
+        "启用条件：自行实现 _do_submit 且显式设置 " + LIVE_TRADING_ENV + "=1；未设置时构造即抛 BrokerUnavailable。",
         "未接入前请在 /api/system/status 中向用户明示「真实通道未接入」，避免误以为可以实盘下单。",
     ]
+
+    def __init__(self, fee: Optional[FeeConfig] = None, clock: Optional[Callable[[], Any]] = None):
+        """真门禁：未显式打开 ``LIVE_TRADING_ENV`` 时，构造本身即抛 ``BrokerUnavailable``。"""
+        if not self.is_enabled():
+            raise BrokerUnavailable(_GATE_TEMPLATE)
+        super().__init__(fee=fee, clock=clock)
+
+    @staticmethod
+    def is_enabled() -> bool:
+        """当前进程是否显式打开了真实交易开关（不构造实例，供展示与门禁共用同一判定）。"""
+        return live_trading_enabled()
 
     @property
     def enabled(self) -> bool:
         """是否显式打开了真实交易开关（仅表示用户意图，占位实现仍不可用）。"""
-        return os.environ.get(LIVE_TRADING_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+        return self.is_enabled()
 
     def _blocked(self, action: str) -> BrokerUnavailable:
         return BrokerUnavailable("真实券商通道%s不可用：%s" % (action, _UNAVAILABLE_TEMPLATE))
@@ -139,7 +182,9 @@ def available_brokers() -> Dict[str, Dict[str, Any]]:
     live["impl"] = "quantstudio.trading.adapters.LiveBrokerStub"
     live["default"] = False
     live["enable_flag"] = LIVE_TRADING_ENV
-    live["enabled"] = LiveBrokerStub().enabled
+    # 注意：这里不能实例化 LiveBrokerStub（未打开开关时构造即抛 BrokerUnavailable），
+    # 用同一判定函数读取「用户意图」，保证与构造门禁语义一致。
+    live["enabled"] = LiveBrokerStub.is_enabled()
     live["steps"] = list(LIVE_TRADING_STEPS)
     live["risk_control"] = list(LIVE_TRADING_RISK)
     live["notes"] = [

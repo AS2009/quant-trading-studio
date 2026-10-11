@@ -45,6 +45,11 @@ def parse_args():
                    help="跳数滑点（最小变动价位的跳数，与 --slippage-bps 叠加）")
     p.add_argument("--tick-size", type=float, default=0.01, help="最小变动价位（元，跳数滑点用）")
     p.add_argument("--lot-size", type=int, default=100, help="最小交易单位（股）")
+    p.add_argument("--fill-mode", default="close", choices=["close", "open"],
+                   help="成交价模型：close=当日收盘价（默认）；open=当日开盘价（更保守，"
+                        "注意是「当日」开盘而非次日开盘）")
+    p.add_argument("--risk-free-rate", type=float, default=0.0,
+                   help="无风险利率（年化小数，0.02 = 2%%），用于夏普/索提诺分子，默认 0")
     p.add_argument("--param", action="append", default=[], help="策略参数覆盖，形如 --param short_ma=10")
     p.add_argument("--out", default="", help="结果 JSON 输出路径")
     p.add_argument("--csv", default="", help="净值 CSV 输出路径")
@@ -95,7 +100,10 @@ def main():
         print("未知策略 %r，用 --list 查看可用策略" % args.strategy, file=sys.stderr)
         return 2
     strategy = create(args.strategy, params=params, symbols=symbols)
-    engine = BacktestEngine(provider=get_provider(), calendar=TradingCalendar())
+    # 成交价模型与无风险利率是**请求级**参数，与服务层一致（见 services/backtest_service.py）：
+    # 这里显式构造引擎，所以要自己把两个开关传进去，否则 CLI 永远只能跑默认口径。
+    engine = BacktestEngine(provider=get_provider(), calendar=TradingCalendar(),
+                            fill_mode=args.fill_mode, risk_free_rate=args.risk_free_rate)
     result = engine.run(request, strategy)
     data = result.to_dict()
     metrics = data["metrics"]
@@ -105,6 +113,9 @@ def main():
     print("标的池      : %s" % (", ".join(request.symbols) or "策略默认"))
     print("区间        : %s ~ %s  共 %s 个交易日" % (data["range"].get("start"), data["range"].get("end"), metrics.get("trading_days")))
     print("初始资金    : %s 元   基准: %s" % ("{:,.0f}".format(request.initial_cash), request.benchmark))
+    print("成交口径    : %s%s" % (
+        "当日收盘价" if args.fill_mode == "close" else "当日开盘价",
+        "" if not args.risk_free_rate else "   无风险利率 %.2f%%" % (args.risk_free_rate * 100)))
     print("-" * 72)
     print("累计收益    : %+.2f%%   （基准 %+.2f%%，超额 %+.2f%%）" % (
         metrics["total_return_pct"], metrics["benchmark_return_pct"],

@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # backend/
 
@@ -20,6 +21,7 @@ from quantstudio.core.errors import BrokerUnavailable, DataSourceError, Validati
 from quantstudio.core.models import FeeConfig, OrderRequest, Quote               # noqa: E402
 from quantstudio.portfolio import PortfolioService                               # noqa: E402
 from quantstudio.trading import (                                                # noqa: E402
+    LIVE_TRADING_ENV,
     LiveBrokerStub,
     PaperBroker,
     available_brokers,
@@ -303,10 +305,12 @@ class TradingTestCase(unittest.TestCase):
         self.assertFalse(brokers["live"]["available"])
         self.assertEqual(brokers["live"]["enable_flag"], "QUANTSTUDIO_ENABLE_LIVE_TRADING")
 
-        stub = LiveBrokerStub()
-        self.assertTrue(stub.is_live)
-        with self.assertRaises(BrokerUnavailable):
-            stub.submit(OrderRequest(code="600519.SH", side="buy", qty=100))
+        # 构造门禁（修复 #2a 任务 B）：必须显式打开开关才允许实例化 LiveBrokerStub
+        with mock.patch.dict(os.environ, {LIVE_TRADING_ENV: "1"}):
+            stub = LiveBrokerStub()
+            self.assertTrue(stub.is_live)
+            with self.assertRaises(BrokerUnavailable):
+                stub.submit(OrderRequest(code="600519.SH", side="buy", qty=100))
 
     def test_normalize_code(self):
         self.assertEqual(normalize_code("600519"), "600519.SH")
@@ -314,6 +318,55 @@ class TradingTestCase(unittest.TestCase):
         self.assertEqual(normalize_code("430047"), "430047.BJ")
         with self.assertRaises(ValidationError):
             normalize_code("abc")
+
+
+class LiveTradingGateTestCase(unittest.TestCase):
+    """任务 B：``QUANTSTUDIO_ENABLE_LIVE_TRADING`` 是**构造门禁**，不只是展示属性。"""
+
+    def test_live_stub_requires_env_flag(self):
+        with mock.patch.dict(os.environ):                     # 退出时自动还原环境变量
+            os.environ.pop(LIVE_TRADING_ENV, None)            # 未设置开关
+            self.assertFalse(LiveBrokerStub.is_enabled())
+            with self.assertRaises(BrokerUnavailable) as ctx:
+                LiveBrokerStub()
+            message = str(ctx.exception)
+            self.assertIn(LIVE_TRADING_ENV, message)          # 理由里点明是哪个开关
+            self.assertIn("export", message)                  # 且给出设置方法
+            self.assertIn("重启", message)
+
+            brokers = available_brokers()                     # 门禁关闭时通道清单仍可正常生成
+            self.assertTrue(brokers["paper"]["available"])
+            self.assertFalse(brokers["live"]["available"])    # 展示契约不变
+            self.assertFalse(brokers["live"]["enabled"])
+
+    def test_live_stub_constructs_with_flag_but_never_trades(self):
+        with mock.patch.dict(os.environ, {LIVE_TRADING_ENV: "1"}):
+            self.assertTrue(LiveBrokerStub.is_enabled())
+            stub = LiveBrokerStub()
+            self.assertTrue(stub.is_live)
+            self.assertTrue(stub.enabled)                     # 展示语义与构造门禁同源
+            self.assertFalse(stub.available)                  # live 永远不可用
+            self.assertFalse(available_brokers()["live"]["available"])
+            self.assertTrue(available_brokers()["live"]["enabled"])
+
+            with self.assertRaises(BrokerUnavailable):        # 占位语义：任何交易方法都不放行
+                stub.submit(OrderRequest(code="600519.SH", side="buy", qty=100))
+            with self.assertRaises(BrokerUnavailable):
+                stub.cancel("LIVE20260921000001")
+            for call in (stub.orders, stub.fills, stub.positions, stub.account):
+                with self.assertRaises(BrokerUnavailable):
+                    call()
+
+    def test_env_flag_truthy_values_are_consistent(self):
+        for value in ("1", "true", "TRUE", "yes", "on", " 1 "):
+            with mock.patch.dict(os.environ, {LIVE_TRADING_ENV: value}):
+                self.assertTrue(LiveBrokerStub.is_enabled(), value)
+                self.assertTrue(LiveBrokerStub().enabled, value)     # 开了才允许构造
+        for value in ("", "0", "no", "off", "2", "enabled"):
+            with mock.patch.dict(os.environ, {LIVE_TRADING_ENV: value}):
+                self.assertFalse(LiveBrokerStub.is_enabled(), value)
+                with self.assertRaises(BrokerUnavailable):
+                    LiveBrokerStub()
 
 
 class PortfolioServiceTestCase(unittest.TestCase):

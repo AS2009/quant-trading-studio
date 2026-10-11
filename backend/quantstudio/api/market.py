@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """行情 / 自选池 / 盘口（Level2）接口（``/api/market/*``、``/api/watchlist``、``/api/level2/*``）。"""
 
+import datetime
+
 from flask import Blueprint, current_app, jsonify, request
 
 from ..core.errors import ValidationError
@@ -21,6 +23,21 @@ def _envelope(data):
     return jsonify(
         envelope(data, settings=services.settings, meta=services.market.meta())
     )
+
+
+def _optional_day(raw, field: str):
+    """可选日期参数（``YYYY-MM-DD``）：留空返回 ``None``，格式不对返回 400。
+
+    用 ``date.fromisoformat`` 严格校验，避免把 ``2024-13-45`` 这类脏值传给数据源。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.date.fromisoformat(text[:10]).isoformat()
+    except ValueError:
+        raise ValidationError("%s 需为 YYYY-MM-DD 格式的日期，当前为 %r" % (field, raw),
+                              field=field)
 
 
 def _level2_envelope(data):
@@ -75,7 +92,11 @@ def market_kline():
     )
     freq = parse_freq(request.args.get("freq"), "day")
     adjust = parse_adjust(request.args.get("adjust"), "qfq")
-    return _envelope(services.market.kline(code, days=days, freq=freq, adjust=adjust))
+    # 可选日期区间：给了就返回该区间（而不是「截至今天的最近 days 根」），供回测/图表复用
+    start = _optional_day(request.args.get("start"), "start")
+    end = _optional_day(request.args.get("end"), "end")
+    return _envelope(services.market.kline(code, days=days, freq=freq, adjust=adjust,
+                                           start=start, end=end))
 
 
 @bp.route("/watchlist")

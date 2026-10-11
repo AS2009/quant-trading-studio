@@ -119,9 +119,12 @@ def _run_options(args: Dict[str, Any]) -> Dict[str, Any]:
         if value:
             options[key] = str(value)
     for key in ("initial_cash", "commission_rate", "commission_min", "slippage_bps", "flow_fee",
-                "slippage_ticks", "tick_size", "lot_size"):
+                "slippage_ticks", "tick_size", "lot_size", "risk_free_rate"):
         if args.get(key) is not None:
             options[key] = args[key]
+    fill_mode = args.get("fill_mode")
+    if fill_mode:
+        options["fill_mode"] = str(fill_mode)
     params = args.get("params")
     if isinstance(params, dict) and params:
         options["params"] = dict(params)
@@ -346,6 +349,11 @@ def register(registry: Any) -> None:
                                         minimum=0.0, maximum=100.0),
                 "tick_size": p_num("最小变动价位（元，跳数滑点用；默认 0.01）", minimum=0.0001, maximum=1.0),
                 "lot_size": p_num("最小交易单位（股，默认 100；非 100 股品种可改）", minimum=1.0, maximum=10000.0),
+                "fill_mode": p_str("成交价模型：close=当日收盘价（默认）；open=当日开盘价（更保守，"
+                                   "注意是「当日」开盘而非次日开盘）",
+                                   default="close", enum=["close", "open"]),
+                "risk_free_rate": p_num("无风险利率（年化小数，0.02 = 2%），用于夏普 / 索提诺分子；默认 0",
+                                        minimum=0.0, maximum=1.0),
                 "params": p_object("策略参数覆盖，如 {\"short_ma\": 10, \"long_ma\": 30}"),
                 "include_series": p_bool("是否返回净值 / 回撤 / 月度序列（默认 false，只回摘要）", default=False),
                 "include_trades": p_bool("是否返回逐笔成交流水（默认 false，只回摘要）", default=False),

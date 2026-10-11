@@ -10,12 +10,16 @@
    行情后续满足也不会自动成交，需要用户手动撤单**（``cancel(order_id)``）。
 4. 资金：买入需「成交额 + 费用」≤ 可用现金；挂单时也做一次预检（按限价估算），不足即拒单。
 5. T+1：当日买入部分 ``available_qty=0``，当日不可卖；跨自然日自动解禁（可注入 clock 便于测试）。
-6. 标的：``provider.latest_quotes`` 取不到该标的最新价（或最新价为 0）时拒单；
+6. 涨跌停：以最新价相对 ``quote.prev_close`` 的涨跌幅判定，``|涨跌幅| >= 9.8%`` 视为封板
+   （与回测 ``backtest/broker.py`` 的 ``DEFAULT_LIMIT_PCT`` 同一口径）——**涨停拒绝买入、
+   跌停拒绝卖出**，反向可成交；``prev_close`` 缺失或 <= 0 时跳过该检查，不因此拒单。
+   注：创业板/科创板 20% 涨跌幅暂未区分，统一按 9.8% 处理。
+7. 标的：``provider.latest_quotes`` 取不到该标的最新价（或最新价为 0）时拒单；
    仅在**未注入 provider 的离线模式**下才允许用委托价作为参考价撮合。
-7. 费用：与回测同口径 —— 佣金（双边，最低 5 元）+ 过户费（双边 0.001%）+ 印花税（仅卖出 0.05%）。
-8. 记账：买入按含费用的加权平均成本摊薄；卖出按该成本结算已实现盈亏（与回测口径一致）。
-9. 无实时推送：``positions()`` / ``account()`` 只在被调用时用最新快照估值。
-10. 持久化：账户（现金/持仓/委托/成交/现金流）原子写 JSON 到 ``account_path``，启动即加载；
+8. 费用：与回测同口径 —— 佣金（双边，最低 5 元）+ 过户费（双边 0.001%）+ 印花税（仅卖出 0.05%）。
+9. 记账：买入按含费用的加权平均成本摊薄；卖出按该成本结算已实现盈亏（与回测口径一致）。
+10. 无实时推送：``positions()`` / ``account()`` 只在被调用时用最新快照估值。
+11. 持久化：账户（现金/持仓/委托/成交/现金流）原子写 JSON 到 ``account_path``，启动即加载；
     文件损坏时备份 ``.bak``、打印 warning 并重新初始化，服务不崩。
 
 以上所有拒单都**不抛异常**，而是返回带可读 ``reason`` 的 rejected 委托；接口层只需展示。
@@ -58,6 +62,9 @@ class PaperBroker(BaseBroker):
     kind = "simulated"
     available = True
     order_prefix = "PB"
+    #: 涨跌停判定阈值（%）：与回测 ``backtest/broker.py`` 的 ``DEFAULT_LIMIT_PCT`` 同一口径
+    #: （主板 10% 留 0.2 个百分点容错）；创业板/科创板 20% 涨跌幅暂未区分，统一按 9.8% 处理。
+    limit_pct = 9.8
     description = "内置模拟盘：本地撮合、T+1、最新价±滑点成交，账户原子落盘（默认通道）"
     rules = [
         "数量必须 > 0 且为 100 股的整数倍（1 手 = 100 股），否则拒单。",
@@ -65,6 +72,8 @@ class PaperBroker(BaseBroker):
         "限价不成交时挂为 new 且不会自动撮合，需手动撤单（cancel）。",
         "买入资金不足（成交额+费用 > 可用现金）拒单；卖出超过可卖数量拒单。",
         "T+1：当日买入的股票 available_qty=0，当日不可卖，次一交易日自动解禁。",
+        "涨跌停：最新价相对前收盘的涨跌幅 ≥ 9.8% 视为涨停（拒绝买入）、≤ -9.8% 视为跌停（拒绝卖出），"
+        "反向仍可成交；缺前收盘或前收盘非正时跳过该检查，不因此拒单。",
         "最新价取不到（标的不存在/行情不可用/停牌价为 0）时拒单。",
         "费用：佣金（双边，最低 5 元）+ 过户费（双边 0.001%）+ 印花税（仅卖出 0.05%），与回测口径一致。",
         "账户落盘到 account_path（原子写）；文件损坏时自动备份 .bak 并重置。",
@@ -149,6 +158,10 @@ class PaperBroker(BaseBroker):
             order.name = self._name_of(order.code, quote)
 
         reference = self._reference_price(order, quote)
+        limit_reason = self._limit_reason(order, quote)
+        if limit_reason:
+            # 涨跌停封板：与回测一致，封板方向直接拒单（反向可成交）
+            raise OrderRejected(limit_reason)
         pending_reason = None
         if order.price is not None:
             if order.side == "buy" and order.price < reference:
@@ -209,6 +222,36 @@ class PaperBroker(BaseBroker):
         if self._provider() is None and order.price is not None:
             return float(order.price)          # 离线模式：以委托价为参考价
         raise OrderRejected("无法获取 %s 的最新价（标的不存在或行情不可用），已拒单" % order.code)
+
+    def _limit_reason(self, order: Order, quote: Optional[Quote]) -> str:
+        """涨跌停封板判定：返回拒单理由；可成交或无法判定时返回空字符串。
+
+        口径与回测 ``backtest/broker.py`` 的 ``DEFAULT_LIMIT_PCT``（9.8%）完全一致：
+        最新价相对 ``quote.prev_close`` 的涨跌幅 ``>= 9.8%`` 视为**涨停**（拒绝买入）、
+        ``<= -9.8%`` 视为**跌停**（拒绝卖出）；封板方向不可成交，反向仍可成交。
+
+        边界：只在拿到有效行情快照时判定。``quote`` 缺失（离线模式）、最新价非正、
+        ``prev_close`` 缺失或 <= 0 时一律**跳过检查**，不能因为缺数据而拒单。
+        注：创业板/科创板 20% 涨跌幅不在本实现范围内，统一按 9.8%（主板 + 容错）处理。
+        """
+        if quote is None:
+            return ""
+        price = _num(getattr(quote, "price", 0.0), 0.0)
+        prev_close = _num(getattr(quote, "prev_close", 0.0), 0.0)
+        if price <= 0 or prev_close <= 0:
+            return ""
+        pct = (price / prev_close - 1.0) * 100.0
+        if pct >= self.limit_pct and order.side == "buy":
+            return (
+                "涨停封板（最新价 %.2f 相对前收盘 %.2f 涨 %+.2f%%，达到阈值 %.1f%%）不予买入，已拒单"
+                % (price, prev_close, pct, self.limit_pct)
+            )
+        if pct <= -self.limit_pct and order.side == "sell":
+            return (
+                "跌停封板（最新价 %.2f 相对前收盘 %.2f 跌 %+.2f%%，达到阈值 %.1f%%）不予卖出，已拒单"
+                % (price, prev_close, pct, self.limit_pct)
+            )
+        return ""
 
     def _precheck_buy(self, order: Order, amount: float, fee: float, pending_reason: Optional[str]) -> None:
         if pending_reason and order.price is not None:
@@ -529,6 +572,7 @@ class PaperBroker(BaseBroker):
             "initial_cash": self.initial_cash,
             "cash": round(self._cash, 2),
             "slippage_bps": self.slippage_bps,
+            "limit_pct": self.limit_pct,
             "positions_count": len(self._positions),
         })
         return data
