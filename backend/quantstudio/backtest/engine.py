@@ -5,8 +5,10 @@
 --------------------------------
 1. **标的与基准**：``request.symbols`` → 策略自带标的 → 策略建议池（``strategy.default_symbols``）
    → ``settings.default_watchlist``（取第一个非空的）；基准取 ``request.benchmark``（默认 settings.benchmark）。
-   日线一次取足：``交易日数(区间) + 预热 bar 数 + 2``，上限 ``settings.max_kline_days``（默认 1200）；
+   日线按**日期区间**取数（provider 支持 ``start`` / ``end`` 时，例如腾讯走服务端日期区间）：
+   窗口 = ``[start 往前 warmup 个交易日, end]``，上限 ``settings.max_kline_days``（默认 5000）；
    预热 bar = ``max(spec.min_bars, 60)``，保证区间首日指标已可用，且**绝不引入未来数据**。
+   provider 只支持「最近 N 根」时（旧协议）退回按根数取数 + 事后按日期过滤。
 2. **对齐**：以各标的 / 基准交易日的并集为时间轴，逐标的做**前向填充**（停牌 / 缺失日沿用上一根 bar 的收盘价），
    前向填充只用于估值；**当日没有真实 bar 的标的不会成交**（停牌日不产生成交）。
 3. **逐日循环**（``range_dates`` 升序）：
@@ -26,6 +28,7 @@
 
 import bisect
 import datetime
+import inspect
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..config import Settings, get_settings
@@ -247,6 +250,8 @@ class BacktestEngine:
         self.broker = broker
         self.fill_mode = fill_mode
         self.risk_free_rate = float(risk_free_rate or 0.0)
+        #: provider 是否支持按 start/end 区间取数（None = 尚未探测，见 :meth:`_supports_window`）
+        self._window_support: Optional[bool] = None
 
     # ------------------------------------------------------------------ 主入口
     def run(self, request: BacktestRequest, strategy) -> BacktestResult:
@@ -261,7 +266,7 @@ class BacktestEngine:
         min_bars = max(int(spec.min_bars or 1), 2)
         warmup = max(min_bars, 60)
 
-        span, days, capped = self._fetch_days(request, warmup)
+        span, days, capped, window_start, window_end = self._fetch_plan(request, warmup)
         if capped:
             warnings.append(
                 "区间交易日 %d 天 + 预热 %d 天 超过 settings.max_kline_days=%d，已按上限截取"
@@ -272,9 +277,12 @@ class BacktestEngine:
         series: Dict[str, List[Bar]] = {}
         names: Dict[str, str] = {}
         for code in symbols:
-            series[code] = self._kline(code, days, warnings)
+            series[code] = self._kline(code, days, warnings, window_start, window_end)
             names[code] = self._resolve_name(code)
-        bench_bars = self._kline(request.benchmark, days, warnings) if request.benchmark else []
+        bench_bars = (
+            self._kline(request.benchmark, days, warnings, window_start, window_end)
+            if request.benchmark else []
+        )
         if len(bench_bars) < 2:
             warnings.append("基准 %s 数据不足，基准净值按 1.0 处理" % (request.benchmark or "未指定"))
 
@@ -461,10 +469,28 @@ class BacktestEngine:
         真实终点再算区间：否则区间交易日数算不出来，会退化成 ``default_kline_days``
         （默认 250 根 ≈ 一年），**把用户填的起始日期整个丢掉** —— 表现就是「不管起点填多早，
         回测都只从最近一年开始」。
+
+        区间取数的窗口信息见 :meth:`_fetch_plan`（本方法保持 3 元组契约，便于既有调用方使用）。
+        """
+        span, days, capped, _window_start, _window_end = self._fetch_plan(request, warmup)
+        return span, days, capped
+
+    def _fetch_plan(self, request: BacktestRequest, warmup: int) -> Tuple[int, int, bool, str, str]:
+        """返回 ``(区间交易日数, 请求天数, 是否被截断, 取数窗口起点, 取数窗口终点)``。
+
+        前 3 项与 :meth:`_fetch_days` 完全一致；后 2 项是配合 :meth:`_kline` 的 ``start`` /
+        ``end`` 参数做**按区间取数**的窗口：
+
+        - ``start`` 留空 → 窗口起点为空，只取「最近 ``default_kline_days`` 根」；
+        - ``end`` 留空 → 补成最近交易日用于算区间，但**不传回窗口终点**（等价于「截至今天」，
+          与旧行为完全一致）；显式给了 ``end`` 才回传，此时 provider 会返回**截至该日**的窗口；
+        - 窗口起点 = ``start`` 再往前留 ``warmup`` 个交易日的**日历**余量，保证区间首日指标
+          已经预热好，同时不会因为起点留得太早把无用数据也拉回来。
         """
         span = 0
         start = str(request.start or "").strip()
         end = str(request.end or "").strip()
+        explicit_end = end
         if not end:
             try:
                 end = self.calendar.last_trading_day()
@@ -480,17 +506,92 @@ class BacktestEngine:
         need = span + warmup + 2
         cap = max(int(self.settings.max_kline_days), warmup + 2)
         days = min(max(need, warmup + 2), cap)
-        return span, days, need > cap
+        capped = need > cap
 
-    def _kline(self, code: str, days: int, warnings: List[str]) -> List[Bar]:
+        window_start = window_end = ""
+        if start:
+            window_start = self._window_start(start, warmup)
+            if window_start:
+                # 窗口比「span + 预热」更长时（久远区间）以窗口为准，否则会漏掉预热 bar
+                try:
+                    window_days = len(self.calendar.trading_days(window_start, end))
+                except Exception:
+                    window_days = 0
+                if window_days > 0:
+                    days = min(max(window_days + 2, warmup + 2), cap)
+        if explicit_end:
+            window_end = end
+        return span, days, capped, window_start, window_end
+
+    def _window_start(self, start: str, warmup: int) -> str:
+        """取数窗口起点：``start`` 往前留足 ``warmup`` 个交易日的日历余量。
+
+        真实交易日占自然日约 5/7（去掉周末与节假日约 0.66），这里用**保守下界 0.6** 折算：
+        ``ceil(warmup / 0.6)`` 个自然日一定能覆盖 ``warmup`` 个交易日，宁可多留几天
+        （多几个 bar 只影响预热，不影响结果），也不能少留导致指标没预热完。
+        """
+        try:
+            anchor = datetime.date.fromisoformat(str(start)[:10])
+        except (TypeError, ValueError):
+            return ""
+        keep = max(int(warmup or 0), 1)
+        back = int(keep / 0.6) + 7
+        for _ in range(4):
+            day = (anchor - datetime.timedelta(days=back)).isoformat()
+            try:
+                if len(self.calendar.trading_days(day, start)) >= keep:
+                    return day
+            except Exception:                      # noqa: BLE001 - 日历异常就别挑起点
+                return day
+            back *= 2
+        return (anchor - datetime.timedelta(days=back)).isoformat()
+
+    def _supports_window(self) -> bool:
+        """provider 的 ``kline`` 是否接受 ``start`` / ``end``（按区间取数）。
+
+        为兼容按旧协议（4 个参数）实现的自定义 provider / 测试桩，这里探测一次签名并缓存：
+        - 接受 → ``True``，之后按区间取数（腾讯走服务端日期区间）；
+        - 不接受 → ``False``，退回「按根数取最近 N 根」，由 :meth:`_timeline` 按日期过滤。
+        探测失败（无签名 / 内建函数）时同样退回旧行为，绝不让取数因探测而失败。
+        """
+        if self._window_support is None:
+            try:
+                params = inspect.signature(self.provider.kline).parameters
+                self._window_support = any(
+                    item.kind is inspect.Parameter.VAR_KEYWORD for item in params.values()
+                ) or {"start", "end"} <= set(params)
+            except (TypeError, ValueError, AttributeError):
+                self._window_support = False
+        return bool(self._window_support)
+
+    def _kline(self, code: str, days: int, warnings: List[str],
+               start: str = "", end: str = "") -> List[Bar]:
+        """取单个标的的日线（按升序、去重、剔除非正收盘）。
+
+        ``start`` / ``end`` 非空且 provider 支持区间取数时，交给 provider 取**该窗口**；
+        否则退回「最近 ``days`` 根」，由 :meth:`_timeline` 事后按日期过滤。
+        """
         if not code:
             return []
-        try:
+        window = bool(start or end) and self._supports_window()
+
+        def fetch(**kwargs):
             # 固定使用**乘法前复权**日线：`adjust="qfq"` 的口径是「后复权（hfq）序列整体缩放到
             # 最新真实价」（腾讯的 qfq 是减法复权，深历史会出负价，见 data/tencent.py 的
             # 「复权口径」）。末根收盘 == 今日真实价，现金 / 手数模拟才与现实同量级。
-            raw = self.provider.kline(code, days=days, freq="day", adjust="qfq") or []
-        except Exception as exc:  # 单个标的数据失败不影响整体（后续按数据不足处理）
+            return self.provider.kline(code, days=days, freq="day", adjust="qfq", **kwargs) or []
+
+        try:
+            raw = fetch(start=start or None, end=end or None) if window else fetch()
+        except TypeError:
+            # provider 实际不接受 start/end（签名探测误判）：退回旧行为，不打断回测
+            self._window_support = False
+            try:
+                raw = fetch()
+            except Exception as exc:  # 单个标的的数据失败不影响整体（后续按数据不足处理）
+                warnings.append("获取 %s 日线失败：%s" % (code, exc))
+                return []
+        except Exception as exc:  # 单个标的的数据失败不影响整体（后续按数据不足处理）
             warnings.append("获取 %s 日线失败：%s" % (code, exc))
             return []
         by_date: Dict[str, Bar] = {}
